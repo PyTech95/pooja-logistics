@@ -569,3 +569,268 @@ def test_booking_event_pushes_notification(session, tokens):
     n_after = session.get(f"{API}/notifications", headers=_auth(cust_token)).json()
     assert len(n_after) >= n_before + 1
     assert any(n.get("kind") == "booking" for n in n_after)
+
+
+# ============================================================
+# ITERATION 3 — Stripe payments, Object Storage uploads, WebSocket tracking
+# ============================================================
+import io
+import json
+import asyncio
+import websockets
+from urllib.parse import urlparse
+
+
+# ---------- /api/health iteration-3 flags ----------
+def test_health_reports_stripe_and_storage_flags(session):
+    r = session.get(f"{API}/health", timeout=10)
+    assert r.status_code == 200
+    j = r.json()
+    assert j.get("stripe") is True, f"stripe flag not true: {j}"
+    assert j.get("storage") is True, f"storage flag not true: {j}"
+
+
+# ---------- payments: packages ----------
+def test_payments_packages_returns_six(session):
+    r = session.get(f"{API}/payments/packages", timeout=10)
+    assert r.status_code == 200
+    pkgs = r.json()
+    assert isinstance(pkgs, list) and len(pkgs) == 6
+    ids = {p["id"] for p in pkgs}
+    assert {"p100","p200","p500","p1000","p2000","p5000"}.issubset(ids)
+    for p in pkgs:
+        assert "label" in p and "amount" in p and p["amount"] > 0
+
+
+# ---------- payments: checkout valid + persists payment_transactions ----------
+@pytest.fixture(scope="module")
+def checkout_session(session, tokens):
+    token, _ = tokens["customer"]
+    body = {"package_id": "p100", "origin_url": "https://pooja-logistics.preview.emergentagent.com"}
+    r = session.post(f"{API}/payments/checkout", json=body, headers=_auth(token), timeout=30)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert "url" in j and j["url"].startswith("https://")
+    assert "session_id" in j and isinstance(j["session_id"], str)
+    return token, j
+
+
+def test_payments_checkout_valid_returns_url_and_session(checkout_session):
+    _, j = checkout_session
+    assert "stripe.com" in j["url"] or "checkout.stripe.com" in j["url"]
+
+
+def test_payments_checkout_invalid_package_400(session, tokens):
+    token, _ = tokens["customer"]
+    r = session.post(f"{API}/payments/checkout",
+                     json={"package_id": "p9999", "origin_url": "https://x.test"},
+                     headers=_auth(token), timeout=20)
+    assert r.status_code == 400, r.text
+
+
+def test_payments_status_unpaid_idempotent(session, tokens, checkout_session):
+    token, j = checkout_session
+    sid = j["session_id"]
+    # First call
+    r1 = session.get(f"{API}/payments/status/{sid}", headers=_auth(token), timeout=30)
+    assert r1.status_code == 200, r1.text
+    b1 = r1.json()
+    assert b1["session_id"] == sid
+    assert "payment_status" in b1 and "status" in b1
+    # Second call - must remain idempotent (unpaid session: no wallet credit either way)
+    r2 = session.get(f"{API}/payments/status/{sid}", headers=_auth(token), timeout=30)
+    assert r2.status_code == 200
+    # payment_status should be 'unpaid' or 'pending' or 'open' (since user didn't pay)
+    assert b1.get("payment_status") in {"unpaid", "no_payment_required", "open", "pending", None} or \
+           r2.json().get("payment_status") in {"unpaid", "no_payment_required", "open", "pending", None}
+
+
+def test_payments_status_other_user_forbidden(session, tokens, checkout_session):
+    _, j = checkout_session
+    sid = j["session_id"]
+    other_token, _ = tokens["driver"]
+    r = session.get(f"{API}/payments/status/{sid}", headers=_auth(other_token), timeout=30)
+    assert r.status_code == 403
+
+
+# ---------- uploads: KYC docs ----------
+PNG_1x1 = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xcf"
+    b"\xc0\x00\x00\x00\x03\x00\x01\x83\xd9\x95\x91\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+@pytest.fixture(scope="module")
+def uploaded_file(tokens):
+    token, _ = tokens["driver"]
+    files = {"file": ("aadhaar.png", io.BytesIO(PNG_1x1), "image/png")}
+    r = requests.post(f"{API}/uploads/kyc?kind=aadhaar",
+                      files=files,
+                      headers={"Authorization": f"Bearer {token}"},
+                      timeout=60)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert "id" in j and "url" in j and "size" in j
+    assert j["url"].startswith("/api/uploads/file/")
+    assert j["size"] > 0
+    return token, j
+
+
+def test_upload_kyc_success(uploaded_file):
+    _, j = uploaded_file
+    assert j["id"]
+
+
+def test_upload_kyc_bad_content_type_400(tokens):
+    token, _ = tokens["driver"]
+    files = {"file": ("evil.exe", io.BytesIO(b"MZbad"), "application/x-msdownload")}
+    r = requests.post(f"{API}/uploads/kyc?kind=aadhaar", files=files,
+                      headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    assert r.status_code == 400, r.text
+
+
+def test_upload_kyc_oversized_413(tokens):
+    token, _ = tokens["driver"]
+    big = b"\xff" * (8 * 1024 * 1024 + 32)  # 8MB + 32 bytes
+    files = {"file": ("huge.png", io.BytesIO(big), "image/png")}
+    r = requests.post(f"{API}/uploads/kyc?kind=aadhaar", files=files,
+                      headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    assert r.status_code == 413, r.text
+
+
+def test_uploads_my_lists(session, tokens, uploaded_file):
+    token, j = uploaded_file
+    r = session.get(f"{API}/uploads/my", headers=_auth(token), timeout=15)
+    assert r.status_code == 200
+    docs = r.json()
+    assert isinstance(docs, list) and len(docs) >= 1
+    assert any(d["id"] == j["id"] for d in docs)
+
+
+def test_uploads_file_requires_token(uploaded_file):
+    _, j = uploaded_file
+    r = requests.get(f"{BASE_URL}{j['url']}", timeout=20)
+    assert r.status_code == 401
+
+
+def test_uploads_file_binary_with_token(uploaded_file):
+    token, j = uploaded_file
+    r = requests.get(f"{BASE_URL}{j['url']}",
+                     headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    assert r.status_code == 200, r.text
+    assert r.headers["Content-Type"].startswith("image/")
+    assert len(r.content) > 0
+
+
+def test_uploads_delete_soft_deletes(session, tokens):
+    # Upload a fresh file, then delete it, then verify it's gone from /my
+    token, _ = tokens["driver"]
+    files = {"file": ("todelete.png", io.BytesIO(PNG_1x1), "image/png")}
+    r = requests.post(f"{API}/uploads/kyc?kind=pan", files=files,
+                      headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    assert r.status_code == 200
+    fid = r.json()["id"]
+    r = session.delete(f"{API}/uploads/{fid}", headers=_auth(token), timeout=15)
+    assert r.status_code == 200, r.text
+    # Now /uploads/my should not contain it (since is_deleted=true filters out)
+    r = session.get(f"{API}/uploads/my", headers=_auth(token), timeout=15)
+    assert r.status_code == 200
+    assert not any(d["id"] == fid for d in r.json())
+
+
+# ---------- WebSocket live tracking ----------
+def _ws_url_for(path: str) -> str:
+    """Convert REACT_APP_BACKEND_URL to ws/wss URL."""
+    u = urlparse(BASE_URL)
+    scheme = "wss" if u.scheme == "https" else "ws"
+    return f"{scheme}://{u.netloc}{path}"
+
+
+def test_ws_track_initial_snapshot_and_status_broadcast(session, tokens):
+    # Create a fresh booking dedicated for WS test
+    cust_token, _ = tokens["customer"]
+    drv_token, _ = tokens["driver"]
+    payload = {
+        "service_type": "car", "vehicle_category": "sedan",
+        "pickup": {"lat": 25.61, "lng": 85.12, "address": "WS-A"},
+        "drop":   {"lat": 25.62, "lng": 85.14, "address": "WS-B"},
+        "payment_method": "wallet",
+    }
+    r = session.post(f"{API}/bookings", json=payload, headers=_auth(cust_token), timeout=20)
+    assert r.status_code == 200, r.text
+    bid = r.json()["id"]
+
+    async def _run():
+        url = _ws_url_for(f"/api/ws/track/{bid}")
+        async with websockets.connect(url, open_timeout=15, close_timeout=5) as ws:
+            # initial snapshot
+            first = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            assert first["type"] == "snapshot"
+            assert first["booking"]["id"] == bid
+
+            # PATCH status from driver in a background task to trigger broadcast
+            def _patch():
+                return session.patch(
+                    f"{API}/bookings/{bid}/status",
+                    json={"status": "accepted"},
+                    headers=_auth(drv_token), timeout=15,
+                )
+            loop = asyncio.get_event_loop()
+            patch_fut = loop.run_in_executor(None, _patch)
+
+            # Wait for broadcast message
+            msg = None
+            for _ in range(6):
+                raw = await asyncio.wait_for(ws.recv(), timeout=15)
+                m = json.loads(raw)
+                if m.get("type") == "status":
+                    msg = m
+                    break
+            patch_resp = await patch_fut
+            assert patch_resp.status_code == 200, patch_resp.text
+            assert msg is not None and msg["booking"]["id"] == bid
+            assert msg["booking"]["status"] in {"accepted", "arriving", "on_trip"}
+
+    asyncio.run(_run())
+
+
+def test_ws_track_location_update_from_driver(session, tokens):
+    cust_token, _ = tokens["customer"]
+    drv_token, drv_user = tokens["driver"]
+    # Create a booking and have driver accept it (so driver_id is set)
+    payload = {
+        "service_type": "car", "vehicle_category": "sedan",
+        "pickup": {"lat": 25.6, "lng": 85.1, "address": "LA"},
+        "drop":   {"lat": 25.7, "lng": 85.2, "address": "LB"},
+        "payment_method": "wallet",
+    }
+    r = session.post(f"{API}/bookings", json=payload, headers=_auth(cust_token), timeout=20)
+    assert r.status_code == 200
+    bid = r.json()["id"]
+    r = session.patch(f"{API}/bookings/{bid}/status",
+                      json={"status": "accepted"}, headers=_auth(drv_token), timeout=15)
+    assert r.status_code == 200
+
+    async def _run():
+        url = _ws_url_for(f"/api/ws/track/{bid}")
+        async with websockets.connect(url, open_timeout=15, close_timeout=5) as ws:
+            await asyncio.wait_for(ws.recv(), timeout=10)  # snapshot
+            # Driver pushes location
+            await ws.send(json.dumps({"type": "location", "lat": 25.65, "lng": 85.15, "token": drv_token}))
+            # We should receive the broadcast back
+            for _ in range(5):
+                raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                m = json.loads(raw)
+                if m.get("type") == "location":
+                    assert abs(m["lat"] - 25.65) < 1e-6
+                    assert abs(m["lng"] - 85.15) < 1e-6
+                    return
+            raise AssertionError("did not receive location broadcast")
+
+    asyncio.run(_run())
+    # Verify persisted to DB via booking fetch
+    r = session.get(f"{API}/bookings", headers=_auth(cust_token), timeout=15)
+    assert r.status_code == 200
+    b = next((x for x in r.json() if x["id"] == bid), None)
+    assert b and abs(b.get("live_lat", 0) - 25.65) < 1e-6

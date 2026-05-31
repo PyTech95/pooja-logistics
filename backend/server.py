@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -8,9 +8,11 @@ import random
 import math
 import jwt
 import uuid
+import requests
+import asyncio
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Literal, Dict, Any, Set
 from datetime import datetime, timezone, timedelta
 
 # Load env
@@ -24,6 +26,51 @@ db = client[os.environ['DB_NAME']]
 JWT_SECRET = os.environ.get('JWT_SECRET', 'rk-pooja-dev-secret')
 JWT_ALGO = 'HS256'
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
+
+# Object storage
+STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+APP_NAME = "rkpooja"
+_storage_key: Optional[str] = None
+
+def init_storage():
+    global _storage_key
+    if _storage_key:
+        return _storage_key
+    if not EMERGENT_LLM_KEY:
+        return None
+    try:
+        r = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_LLM_KEY}, timeout=30)
+        r.raise_for_status()
+        _storage_key = r.json()["storage_key"]
+        logging.info("Object storage initialized")
+        return _storage_key
+    except Exception as e:
+        logging.exception("Storage init failed: %s", e)
+        return None
+
+def put_object(path: str, data: bytes, content_type: str) -> dict:
+    key = init_storage()
+    if not key:
+        raise HTTPException(500, "Storage unavailable")
+    r = requests.put(
+        f"{STORAGE_URL}/objects/{path}",
+        headers={"X-Storage-Key": key, "Content-Type": content_type},
+        data=data, timeout=120,
+    )
+    r.raise_for_status()
+    return r.json()
+
+def get_object(path: str):
+    key = init_storage()
+    if not key:
+        raise HTTPException(500, "Storage unavailable")
+    r = requests.get(
+        f"{STORAGE_URL}/objects/{path}",
+        headers={"X-Storage-Key": key}, timeout=60,
+    )
+    r.raise_for_status()
+    return r.content, r.headers.get("Content-Type", "application/octet-stream")
 
 app = FastAPI(title="RK POOJA Super App API")
 api = APIRouter(prefix="/api")
@@ -426,6 +473,8 @@ async def update_booking_status(booking_id: str, req: BookingStatusUpdate, user=
             "type": "trip", "created_at": now_iso(),
         })
     await db.bookings.update_one({"id": booking_id}, {"$set": update})
+    # Broadcast to WebSocket subscribers
+    asyncio.create_task(_broadcast_booking(booking_id))
     # Notify customer on state changes
     if req.status in ("accepted", "arrived", "started", "completed", "cancelled"):
         msg = {
@@ -741,7 +790,262 @@ async def seed_demo():
 
 @api.get("/health")
 async def health():
-    return {"status": "ok", "time": now_iso()}
+    return {"status": "ok", "time": now_iso(), "stripe": bool(STRIPE_API_KEY), "storage": bool(EMERGENT_LLM_KEY)}
+
+# ============================================================
+# STRIPE PAYMENTS (wallet topup)
+# ============================================================
+WALLET_PACKAGES = {
+    "p100":  {"label": "₹100",  "amount": 100.0},
+    "p200":  {"label": "₹200",  "amount": 200.0},
+    "p500":  {"label": "₹500",  "amount": 500.0},
+    "p1000": {"label": "₹1,000","amount": 1000.0},
+    "p2000": {"label": "₹2,000","amount": 2000.0},
+    "p5000": {"label": "₹5,000","amount": 5000.0},
+}
+
+class CheckoutCreate(BaseModel):
+    package_id: str
+    origin_url: str
+
+@api.get("/payments/packages")
+async def list_packages():
+    return [{"id": k, **v} for k, v in WALLET_PACKAGES.items()]
+
+@api.post("/payments/checkout")
+async def create_checkout(req: CheckoutCreate, http_request: Request, user=Depends(get_current_user)):
+    if not STRIPE_API_KEY:
+        raise HTTPException(503, "Stripe not configured")
+    if req.package_id not in WALLET_PACKAGES:
+        raise HTTPException(400, "Invalid package")
+    pkg = WALLET_PACKAGES[req.package_id]
+    try:
+        from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionRequest
+    except ImportError:
+        raise HTTPException(500, "Payment lib not installed")
+
+    host = str(http_request.base_url).rstrip("/")
+    webhook_url = f"{host}/api/webhook/stripe"
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    origin = req.origin_url.rstrip("/")
+    success_url = f"{origin}/app/wallet?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{origin}/app/wallet?cancelled=1"
+    metadata = {"user_id": user["id"], "package_id": req.package_id, "purpose": "wallet_topup"}
+    creq = CheckoutSessionRequest(amount=pkg["amount"], currency="inr",
+                                  success_url=success_url, cancel_url=cancel_url, metadata=metadata)
+    session = await stripe.create_checkout_session(creq)
+    await db.payment_transactions.insert_one({
+        "id": new_id(),
+        "session_id": session.session_id,
+        "user_id": user["id"], "user_email": user["email"],
+        "amount": pkg["amount"], "currency": "INR",
+        "package_id": req.package_id, "metadata": metadata,
+        "payment_status": "initiated", "status": "open",
+        "created_at": now_iso(),
+    })
+    return {"url": session.url, "session_id": session.session_id}
+
+@api.get("/payments/status/{session_id}")
+async def payment_status(session_id: str, http_request: Request, user=Depends(get_current_user)):
+    if not STRIPE_API_KEY:
+        raise HTTPException(503, "Stripe not configured")
+    try:
+        from emergentintegrations.payments.stripe.checkout import StripeCheckout
+    except ImportError:
+        raise HTTPException(500, "Payment lib not installed")
+    host = str(http_request.base_url).rstrip("/")
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=f"{host}/api/webhook/stripe")
+    status = await stripe.get_checkout_status(session_id)
+    txn = await db.payment_transactions.find_one({"session_id": session_id})
+    if txn and txn.get("user_id") != user["id"]:
+        raise HTTPException(403, "Not your transaction")
+    # Idempotent credit
+    if txn and status.payment_status == "paid" and txn.get("payment_status") != "paid":
+        await db.payment_transactions.update_one(
+            {"session_id": session_id, "payment_status": {"$ne": "paid"}},
+            {"$set": {"payment_status": "paid", "status": status.status, "updated_at": now_iso()}}
+        )
+        # Only credit if the update actually happened (race-safe)
+        re_check = await db.payment_transactions.find_one({"session_id": session_id})
+        if re_check and re_check.get("credited") != True:
+            await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": float(status.amount_total) / 100.0}})
+            await db.transactions.insert_one({
+                "id": new_id(), "user_id": user["id"], "amount": float(status.amount_total) / 100.0,
+                "type": "topup", "status": "success", "session_id": session_id, "created_at": now_iso(),
+            })
+            await db.payment_transactions.update_one({"session_id": session_id}, {"$set": {"credited": True}})
+            await push_notification(user["id"], "Wallet topped up 💳", f"₹{float(status.amount_total)/100:.0f} added via Stripe", "reward")
+    elif txn:
+        await db.payment_transactions.update_one({"session_id": session_id},
+            {"$set": {"payment_status": status.payment_status, "status": status.status, "updated_at": now_iso()}})
+    return {
+        "session_id": session_id,
+        "payment_status": status.payment_status,
+        "status": status.status,
+        "amount_total": status.amount_total,
+        "currency": status.currency,
+    }
+
+@app.post("/api/webhook/stripe")
+async def stripe_webhook(request: Request):
+    if not STRIPE_API_KEY:
+        return {"received": False}
+    try:
+        from emergentintegrations.payments.stripe.checkout import StripeCheckout
+        host = str(request.base_url).rstrip("/")
+        stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=f"{host}/api/webhook/stripe")
+        body = await request.body()
+        sig = request.headers.get("Stripe-Signature", "")
+        evt = await stripe.handle_webhook(body, sig)
+        if evt.event_type == "checkout.session.completed" and evt.payment_status == "paid":
+            txn = await db.payment_transactions.find_one({"session_id": evt.session_id})
+            if txn and txn.get("credited") != True:
+                meta = evt.metadata or {}
+                uid = meta.get("user_id") or txn.get("user_id")
+                if uid:
+                    await db.users.update_one({"id": uid}, {"$inc": {"wallet_balance": txn.get("amount", 0)}})
+                    await db.payment_transactions.update_one({"session_id": evt.session_id},
+                        {"$set": {"payment_status": "paid", "credited": True, "updated_at": now_iso()}})
+                    await push_notification(uid, "Wallet topped up 💳", f"₹{txn.get('amount',0):.0f} via Stripe (webhook)", "reward")
+        return {"received": True}
+    except Exception as e:
+        logging.exception("stripe webhook failed: %s", e)
+        return {"received": False, "error": str(e)}
+
+# ============================================================
+# OBJECT STORAGE — Driver KYC document uploads
+# ============================================================
+ALLOWED_MIME = {"image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"}
+MAX_BYTES = 8 * 1024 * 1024  # 8 MB
+
+@api.post("/uploads/kyc")
+async def upload_kyc(file: UploadFile = File(...), kind: str = "doc", user=Depends(get_current_user)):
+    if file.content_type not in ALLOWED_MIME:
+        raise HTTPException(400, f"Unsupported file type {file.content_type}")
+    data = await file.read()
+    if len(data) > MAX_BYTES:
+        raise HTTPException(413, "File too large (max 8MB)")
+    ext = (file.filename.rsplit(".", 1)[-1] or "bin").lower()
+    file_uuid = new_id()
+    path = f"{APP_NAME}/uploads/{user['id']}/{file_uuid}.{ext}"
+    try:
+        result = put_object(path, data, file.content_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.exception("upload failed: %s", e)
+        raise HTTPException(500, "Upload failed")
+    rec = {
+        "id": file_uuid, "user_id": user["id"], "kind": kind,
+        "storage_path": result["path"], "original_filename": file.filename,
+        "content_type": file.content_type, "size": result.get("size", len(data)),
+        "is_deleted": False, "created_at": now_iso(),
+    }
+    await db.files.insert_one({**rec})
+    rec.pop("_id", None)
+    rec["url"] = f"/api/uploads/file/{file_uuid}"
+    return rec
+
+from fastapi.responses import Response
+
+@api.get("/uploads/file/{file_id}")
+async def fetch_file(file_id: str, authorization: Optional[str] = Header(None), auth: Optional[str] = None):
+    # Support img-tag auth via query param
+    if not authorization and auth:
+        authorization = f"Bearer {auth}"
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing token")
+    try:
+        decode_token(authorization.replace("Bearer ", ""))
+    except HTTPException:
+        raise
+    rec = await db.files.find_one({"id": file_id, "is_deleted": False}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    data, ctype = get_object(rec["storage_path"])
+    return Response(content=data, media_type=rec.get("content_type", ctype))
+
+@api.get("/uploads/my")
+async def my_uploads(user=Depends(get_current_user)):
+    docs = await db.files.find({"user_id": user["id"], "is_deleted": False}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    for d in docs:
+        d["url"] = f"/api/uploads/file/{d['id']}"
+    return docs
+
+@api.delete("/uploads/{file_id}")
+async def delete_upload(file_id: str, user=Depends(get_current_user)):
+    res = await db.files.update_one({"id": file_id, "user_id": user["id"]}, {"$set": {"is_deleted": True, "deleted_at": now_iso()}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+# ============================================================
+# WEBSOCKET — Live tracking
+# ============================================================
+class TrackHub:
+    def __init__(self):
+        self.connections: Dict[str, Set[WebSocket]] = {}
+
+    async def connect(self, booking_id: str, ws: WebSocket):
+        await ws.accept()
+        self.connections.setdefault(booking_id, set()).add(ws)
+
+    def disconnect(self, booking_id: str, ws: WebSocket):
+        if booking_id in self.connections:
+            self.connections[booking_id].discard(ws)
+            if not self.connections[booking_id]:
+                del self.connections[booking_id]
+
+    async def broadcast(self, booking_id: str, payload: dict):
+        if booking_id not in self.connections:
+            return
+        dead = []
+        for ws in list(self.connections[booking_id]):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(booking_id, ws)
+
+track_hub = TrackHub()
+
+@app.websocket("/api/ws/track/{booking_id}")
+async def ws_track(ws: WebSocket, booking_id: str):
+    await track_hub.connect(booking_id, ws)
+    # Send initial snapshot
+    b = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if b:
+        await ws.send_json({"type": "snapshot", "booking": b})
+    try:
+        while True:
+            msg = await ws.receive_json()
+            # Driver can push location: {type:"location", lat, lng, token}
+            if msg.get("type") == "location":
+                token = msg.get("token", "")
+                try:
+                    data = decode_token(token)
+                except HTTPException:
+                    continue
+                driver_user = await db.users.find_one({"id": data.get("user_id")}, {"_id": 0})
+                if not driver_user or driver_user.get("role") != "driver":
+                    continue
+                lat, lng = msg.get("lat"), msg.get("lng")
+                await db.bookings.update_one(
+                    {"id": booking_id, "driver_id": driver_user["id"]},
+                    {"$set": {"live_lat": lat, "live_lng": lng, "updated_at": now_iso()}}
+                )
+                await track_hub.broadcast(booking_id, {"type": "location", "lat": lat, "lng": lng, "at": now_iso()})
+    except WebSocketDisconnect:
+        track_hub.disconnect(booking_id, ws)
+    except Exception:
+        track_hub.disconnect(booking_id, ws)
+
+# Hook booking status updates into the hub
+async def _broadcast_booking(booking_id: str):
+    b = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if b:
+        await track_hub.broadcast(booking_id, {"type": "status", "booking": b})
 
 # ============================================================
 # NOTIFICATIONS, REFERRALS, BUS SEATS, TRIP SHARE
@@ -895,6 +1199,10 @@ app.add_middleware(
 )
 
 logging.basicConfig(level=logging.INFO)
+
+@app.on_event("startup")
+async def on_startup():
+    init_storage()
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

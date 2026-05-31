@@ -1,16 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { MapCanvas } from "@/components/MapCanvas";
+import { LeafletMap } from "@/components/LeafletMap";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { ArrowLeft, Phone, MessageSquare, ShieldAlert, Star, X, Share2 } from "lucide-react";
+import { ArrowLeft, Phone, MessageSquare, ShieldAlert, Star, X, Share2, Radio } from "lucide-react";
 
 export const TrackBooking = () => {
   const { id } = useParams();
   const nav = useNavigate();
   const [booking, setBooking] = useState(null);
   const [rating, setRating] = useState(0);
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef(null);
 
   const load = async () => {
     try {
@@ -21,8 +23,27 @@ export const TrackBooking = () => {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 4000);
-    return () => clearInterval(t);
+    // WebSocket live tracking
+    const wsUrl = (process.env.REACT_APP_BACKEND_URL || "").replace(/^http/, "ws") + `/api/ws/track/${id}`;
+    try {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      ws.onopen  = () => setWsConnected(true);
+      ws.onclose = () => setWsConnected(false);
+      ws.onerror = () => setWsConnected(false);
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "snapshot" || msg.type === "status") setBooking(msg.booking);
+          else if (msg.type === "location") {
+            setBooking((b) => b ? { ...b, live_lat: msg.lat, live_lng: msg.lng } : b);
+          }
+        } catch {}
+      };
+    } catch {}
+    // Fallback polling (less frequent now that WS is on)
+    const t = setInterval(load, 8000);
+    return () => { clearInterval(t); try { wsRef.current?.close(); } catch {} };
   }, [id]);
 
   const sos = async () => {
@@ -70,17 +91,27 @@ export const TrackBooking = () => {
   return (
     <div className="min-h-screen flex flex-col">
       <div className="relative h-[50vh]">
-        <MapCanvas pickup drop driver={isLive} />
-        <Button size="icon" variant="secondary" className="absolute top-4 left-4 rounded-full" onClick={() => nav("/app")} data-testid="back-btn">
+        <LeafletMap
+          pickup={booking.pickup}
+          drop={booking.drop}
+          driver={isLive && booking.live_lat ? { lat: booking.live_lat, lng: booking.live_lng } : null}
+        />
+        <Button size="icon" variant="secondary" className="absolute top-4 left-4 rounded-full z-[500]" onClick={() => nav("/app")} data-testid="back-btn">
           <ArrowLeft className="h-5 w-5"/>
         </Button>
-        <div className="absolute top-4 right-4 left-16 glass rounded-2xl p-3">
-          <div className="label-eyebrow">{booking.code}</div>
-          <div className="font-display font-bold text-sm">{statusLabel}</div>
+        <div className="absolute top-4 right-4 left-16 glass rounded-2xl p-3 z-[500]">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="label-eyebrow">{booking.code}</div>
+              <div className="font-display font-bold text-sm">{statusLabel}</div>
+            </div>
+            {wsConnected && (
+              <div className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-success" data-testid="ws-indicator">
+                <Radio className="h-3 w-3 animate-pulse"/> Live
+              </div>
+            )}
+          </div>
         </div>
-        {booking.status === "requested" && (
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 pulse-ring h-3 w-3 rounded-full bg-flame" />
-        )}
       </div>
 
       <div className="flex-1 -mt-6 rounded-t-3xl bg-card border-t border-border p-5 pb-10 relative z-10">

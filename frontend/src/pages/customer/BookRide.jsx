@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { MapCanvas } from "@/components/MapCanvas";
+import { LeafletMap } from "@/components/LeafletMap";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { ArrowLeft, MapPin, Navigation2, Users, IndianRupee, Loader2, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, MapPin, Navigation2, Users, IndianRupee, Loader2, CheckCircle2, Locate } from "lucide-react";
 
 // Sample popular Indian city coordinates
 const PLACES = [
@@ -54,6 +54,20 @@ export const BookRide = () => {
   const filteredPickup = PLACES.filter(p => !pickupQ || p.name.toLowerCase().includes(pickupQ.toLowerCase()));
   const filteredDrop = PLACES.filter(p => !dropQ || p.name.toLowerCase().includes(dropQ.toLowerCase()));
 
+  const useMyLocation = () => {
+    if (!navigator.geolocation) return toast.error("Geolocation not supported");
+    toast.loading("Locating you…", { id: "geo" });
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        toast.dismiss("geo");
+        toast.success("Pickup set to your current location");
+        setPickup({ name: "My current location", lat: pos.coords.latitude, lng: pos.coords.longitude });
+      },
+      (err) => { toast.dismiss("geo"); toast.error("Could not get location — " + err.message); },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  };
+
   const getEstimates = async () => {
     setLoading(true);
     try {
@@ -91,8 +105,8 @@ export const BookRide = () => {
     <div className="min-h-screen flex flex-col">
       {/* Map background */}
       <div className="relative h-[40vh] bg-secondary">
-        <MapCanvas pickup drop />
-        <div className="absolute top-4 left-4 right-4 flex items-center justify-between">
+        <LeafletMap pickup={pickup} drop={drop} />
+        <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-[500]">
           <Button size="icon" variant="secondary" className="rounded-full shadow" onClick={() => nav("/app")} data-testid="back-btn">
             <ArrowLeft className="h-5 w-5" />
           </Button>
@@ -158,7 +172,11 @@ export const BookRide = () => {
               ))}
             </div>
 
-            <Button className="w-full h-12 mt-7 bg-flame hover:bg-flame-dark text-white" disabled={loading} onClick={getEstimates} data-testid="get-estimates-btn">
+            <Button variant="outline" className="w-full h-11 mt-4" onClick={useMyLocation} data-testid="use-location-btn">
+              <Locate className="h-4 w-4 mr-2"/> Use my current location
+            </Button>
+
+            <Button className="w-full h-12 mt-4 bg-flame hover:bg-flame-dark text-white" disabled={loading} onClick={getEstimates} data-testid="get-estimates-btn">
               {loading ? <Loader2 className="h-4 w-4 animate-spin"/> : "See vehicles & fares"}
             </Button>
           </>

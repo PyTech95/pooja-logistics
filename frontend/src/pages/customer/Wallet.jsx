@@ -1,28 +1,78 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
-import { Plus, ArrowUpRight, ArrowDownRight } from "lucide-react";
-
-const QUICK = [100, 200, 500, 1000, 2000];
+import { Plus, ArrowUpRight, ArrowDownRight, CreditCard, Loader2, ShieldCheck } from "lucide-react";
 
 export const Wallet = () => {
   const { refresh } = useAuth();
   const [data, setData] = useState({ balance: 0, transactions: [] });
+  const [packages, setPackages] = useState([]);
+  const [paying, setPaying] = useState(null);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const load = async () => {
-    const r = await api.get("/wallet");
-    setData(r.data);
+    const [w, p] = await Promise.all([api.get("/wallet"), api.get("/payments/packages")]);
+    setData(w.data);
+    setPackages(p.data);
   };
 
   useEffect(() => { load(); }, []);
 
-  const topup = async (amount) => {
-    await api.post("/wallet/topup", { amount });
-    toast.success(`₹${amount} added to wallet`);
-    await refresh();
-    load();
+  // Handle return from Stripe (poll status)
+  useEffect(() => {
+    const sid = searchParams.get("session_id");
+    const cancelled = searchParams.get("cancelled");
+    if (cancelled) {
+      toast("Payment cancelled");
+      setSearchParams({}, { replace: true });
+      return;
+    }
+    if (!sid) return;
+    let attempts = 0;
+    const max = 6;
+    const tick = async () => {
+      attempts++;
+      try {
+        const r = await api.get(`/payments/status/${sid}`);
+        if (r.data.payment_status === "paid") {
+          toast.success("Payment successful — wallet credited!");
+          setSearchParams({}, { replace: true });
+          await refresh();
+          load();
+          return;
+        }
+        if (r.data.status === "expired") {
+          toast.error("Payment session expired");
+          setSearchParams({}, { replace: true });
+          return;
+        }
+        if (attempts < max) setTimeout(tick, 2000);
+        else { toast("Payment status pending — check again shortly"); setSearchParams({}, { replace: true }); }
+      } catch {
+        if (attempts < max) setTimeout(tick, 2000);
+      }
+    };
+    toast.loading("Confirming payment…", { id: "pay-poll" });
+    tick();
+    return () => toast.dismiss("pay-poll");
+    // eslint-disable-next-line
+  }, []);
+
+  const buyPackage = async (pkg) => {
+    setPaying(pkg.id);
+    try {
+      const r = await api.post("/payments/checkout", {
+        package_id: pkg.id,
+        origin_url: window.location.origin,
+      });
+      window.location.href = r.data.url;
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not start checkout");
+      setPaying(null);
+    }
   };
 
   return (
@@ -39,13 +89,24 @@ export const Wallet = () => {
       </div>
 
       <div className="mt-6">
-        <div className="label-eyebrow mb-2">Add money</div>
-        <div className="flex flex-wrap gap-2">
-          {QUICK.map(q => (
-            <Button key={q} variant="outline" onClick={() => topup(q)} data-testid={`topup-${q}`} className="rounded-full h-10">
-              <Plus className="h-3 w-3 mr-1" /> ₹{q}
+        <div className="flex items-center justify-between mb-2">
+          <div className="label-eyebrow">Add money</div>
+          <div className="inline-flex items-center gap-1 text-[10px] text-success font-bold uppercase tracking-wider">
+            <ShieldCheck className="h-3 w-3"/> Secured by Stripe
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {packages.map(p => (
+            <Button key={p.id} variant="outline" onClick={() => buyPackage(p)} disabled={paying === p.id}
+              data-testid={`topup-${p.id}`} className="h-14 flex-col gap-0.5 rounded-2xl hover:border-flame">
+              {paying === p.id
+                ? <Loader2 className="h-4 w-4 animate-spin text-flame"/>
+                : <><span className="font-display font-black text-base">{p.label}</span><span className="text-[10px] text-muted-foreground">Pay</span></>}
             </Button>
           ))}
+        </div>
+        <div className="mt-3 text-[11px] text-muted-foreground inline-flex items-center gap-1">
+          <CreditCard className="h-3 w-3"/> UPI, Cards, Net Banking, Wallets supported
         </div>
       </div>
 
