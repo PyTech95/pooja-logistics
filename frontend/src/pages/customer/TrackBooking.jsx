@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { MapCanvas } from "@/components/MapCanvas";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { ArrowLeft, Phone, MessageSquare, ShieldAlert, Star, X } from "lucide-react";
+import { ArrowLeft, Phone, MessageSquare, ShieldAlert, Star, X, Share2 } from "lucide-react";
 
 export const TrackBooking = () => {
   const { id } = useParams();
@@ -41,6 +41,17 @@ export const TrackBooking = () => {
     await api.post(`/bookings/${id}/rate`, { rating, review: "" });
     toast.success("Thanks for your feedback");
     nav("/app/trips", { replace: true });
+  };
+
+  const shareTrip = async () => {
+    const text = `Track my ride on RK POOJA · ${booking.code} · ${booking.pickup?.address} → ${booking.drop?.address}`;
+    const url = `${window.location.origin}/app/track/${id}`;
+    if (navigator.share) {
+      try { await navigator.share({ title: "RK POOJA Trip", text, url }); } catch {}
+    } else {
+      navigator.clipboard.writeText(url);
+      toast.success("Trip link copied — share with anyone");
+    }
   };
 
   if (!booking) return <div className="p-6 text-muted-foreground">Loading…</div>;
@@ -102,10 +113,11 @@ export const TrackBooking = () => {
               <div className="font-display font-black text-2xl text-flame">PIN {booking.otp}</div>
             </div>
 
-            <div className="mt-5 grid grid-cols-3 gap-2">
-              <Button variant="outline" className="h-12" data-testid="call-driver-btn"><Phone className="h-4 w-4 mr-1"/>Call</Button>
-              <Button variant="outline" className="h-12" data-testid="msg-driver-btn"><MessageSquare className="h-4 w-4 mr-1"/>Chat</Button>
-              <Button variant="outline" className="h-12 border-destructive text-destructive" onClick={sos} data-testid="sos-btn"><ShieldAlert className="h-4 w-4 mr-1"/>SOS</Button>
+            <div className="mt-5 grid grid-cols-4 gap-2">
+              <Button variant="outline" className="h-12" data-testid="call-driver-btn"><Phone className="h-4 w-4"/></Button>
+              <Button variant="outline" className="h-12" data-testid="msg-driver-btn"><MessageSquare className="h-4 w-4"/></Button>
+              <Button variant="outline" className="h-12" onClick={shareTrip} data-testid="share-trip-btn"><Share2 className="h-4 w-4"/></Button>
+              <Button variant="outline" className="h-12 border-destructive text-destructive" onClick={sos} data-testid="sos-btn"><ShieldAlert className="h-4 w-4"/></Button>
             </div>
 
             <div className="mt-5 border border-border rounded-2xl p-4 space-y-2 text-sm">

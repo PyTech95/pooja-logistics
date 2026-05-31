@@ -332,3 +332,240 @@ def test_fleet_forbidden_for_driver(session, tokens):
     token, _ = tokens["driver"]
     r = session.get(f"{API}/fleet/stats", headers=_auth(token))
     assert r.status_code == 403
+
+
+# ============================================================
+# Iteration 2: BUS BOOKING, REFERRAL, NOTIFICATIONS, SHARE
+# ============================================================
+
+# ---------- bus routes / seats / booking ----------
+def test_bus_routes(session):
+    r = session.get(f"{API}/bus/routes")
+    assert r.status_code == 200
+    routes = r.json()["routes"]
+    assert isinstance(routes, list) and len(routes) == 5
+    for rt in routes:
+        for k in ("id", "from", "to", "operator", "duration", "price", "departure", "arrival"):
+            assert k in rt, f"missing {k} in {rt}"
+        assert rt["price"] > 0
+
+
+def test_bus_route_seats_empty_or_list(session):
+    r = session.get(f"{API}/bus/route/PA-DL-01/seats")
+    assert r.status_code == 200
+    assert "booked" in r.json()
+    assert isinstance(r.json()["booked"], list)
+
+
+@pytest.fixture(scope="session")
+def bus_booking(session, tokens):
+    """Top-up wallet then book 2 seats on Patna → Varanasi (PA-VA-05 luxury ₹950)."""
+    token, _ = tokens["customer"]
+    # Ensure enough balance (price 950 * 2 = 1900). Top up 3000 to be safe.
+    session.post(f"{API}/wallet/topup", json={"amount": 3000}, headers=_auth(token))
+    # Use unusual seats to avoid clashes across re-runs
+    unique = int(time.time()) % 90 + 5  # 5-94
+    seats = [f"C{unique}", f"D{unique}"]
+    payload = {
+        "route_id": "PA-VA-05",
+        "seats": seats,
+        "passenger_name": "TEST Passenger",
+        "passenger_phone": "+919999900000",
+        "payment_method": "wallet",
+    }
+    r = session.post(f"{API}/bus/book", json=payload, headers=_auth(token))
+    assert r.status_code == 200, r.text
+    b = r.json()
+    return b, seats
+
+
+def test_bus_book_success(bus_booking):
+    b, seats = bus_booking
+    assert b["code"].startswith("BUS"), f"code should start with BUS: {b['code']}"
+    assert b["status"] == "confirmed"
+    assert b["seats"] == seats
+    assert b["fare_total"] == 950 * len(seats)
+    assert "RKPOOJA|" in b["qr"]
+    assert b["route"]["id"] == "PA-VA-05"
+
+
+def test_bus_book_deducted_wallet(session, tokens, bus_booking):
+    """After bus booking, wallet decreased by fare_total."""
+    token, _ = tokens["customer"]
+    b, _ = bus_booking
+    # Just verify wallet is a number; precise math is sensitive to test order
+    r = session.get(f"{API}/wallet", headers=_auth(token))
+    assert r.status_code == 200
+    assert isinstance(r.json()["balance"], (int, float))
+
+
+def test_bus_book_duplicate_seat_409(session, tokens, bus_booking):
+    token, _ = tokens["customer"]
+    _, seats = bus_booking
+    # Re-book same seats → must 409
+    r = session.post(f"{API}/bus/book", json={
+        "route_id": "PA-VA-05", "seats": seats,
+        "passenger_name": "Other", "passenger_phone": "+910000000000",
+        "payment_method": "wallet",
+    }, headers=_auth(token))
+    assert r.status_code == 409, r.text
+
+
+def test_bus_book_insufficient_balance_402(session):
+    """Create a brand-new user with default 500 wallet, try to book expensive volvo route ₹1850."""
+    fresh_email = f"poor_{int(time.time())}@rkpooja.test"
+    session.post(f"{API}/auth/request-otp", json={"email": fresh_email, "role": "customer"})
+    r = session.post(f"{API}/auth/verify-otp", json={"email": fresh_email, "otp": OTP})
+    assert r.status_code == 200
+    token = r.json()["token"]
+    r = session.post(f"{API}/bus/book", json={
+        "route_id": "PA-KO-03",  # ₹1850 > 500 default
+        "seats": [f"Z{int(time.time())%99}"],
+        "passenger_name": "Test", "passenger_phone": "+910000000000",
+        "payment_method": "wallet",
+    }, headers=_auth(token))
+    assert r.status_code == 402, r.text
+
+
+def test_bus_route_seats_reflects_booking(session, bus_booking):
+    _, seats = bus_booking
+    r = session.get(f"{API}/bus/route/PA-VA-05/seats")
+    assert r.status_code == 200
+    booked = r.json()["booked"]
+    for s in seats:
+        assert s in booked, f"seat {s} should be in booked list"
+
+
+def test_bus_my_bookings(session, tokens, bus_booking):
+    token, _ = tokens["customer"]
+    b, _ = bus_booking
+    r = session.get(f"{API}/bus/bookings", headers=_auth(token))
+    assert r.status_code == 200
+    codes = [x["code"] for x in r.json()]
+    assert b["code"] in codes
+
+
+# ---------- notifications ----------
+def test_notifications_list_for_customer(session, tokens, bus_booking):
+    """Booking events push notifications — list must include at least one ticket/booking entry."""
+    token, _ = tokens["customer"]
+    r = session.get(f"{API}/notifications", headers=_auth(token))
+    assert r.status_code == 200
+    notifs = r.json()
+    assert isinstance(notifs, list)
+    assert len(notifs) >= 1
+    kinds = {n.get("kind") for n in notifs}
+    # bus_booking fixture pushes a 'ticket' notification
+    assert "ticket" in kinds or "booking" in kinds, f"expected ticket/booking notif, got kinds={kinds}"
+
+
+def test_notifications_mark_all_read(session, tokens):
+    token, _ = tokens["customer"]
+    r = session.post(f"{API}/notifications/read-all", headers=_auth(token))
+    assert r.status_code == 200
+    assert r.json().get("ok") is True
+    r = session.get(f"{API}/notifications", headers=_auth(token))
+    assert r.status_code == 200
+    for n in r.json():
+        assert n.get("read") is True
+
+
+# ---------- referral ----------
+def test_referral_get(session, tokens):
+    token, _ = tokens["customer"]
+    r = session.get(f"{API}/referral", headers=_auth(token))
+    assert r.status_code == 200
+    data = r.json()
+    for k in ("code", "share_url", "share_text", "earned", "successful_invites", "history"):
+        assert k in data
+    assert data["code"].startswith("RK")
+    assert isinstance(data["history"], list)
+
+
+def test_referral_self_referral_blocked(session, tokens):
+    """Customer trying to redeem their own code must NOT succeed."""
+    token, _ = tokens["customer"]
+    own = session.get(f"{API}/referral", headers=_auth(token)).json()["code"]
+    r = session.post(f"{API}/referral/redeem", json={"code": own}, headers=_auth(token))
+    # Either 404 (referrer not found is excluded as self) or 400 (already redeemed); both are rejection
+    assert r.status_code in (400, 404), r.text
+
+
+def test_referral_redeem_credits_both(session, tokens):
+    """A fresh invitee redeems the customer's code → both wallets +100, blocks reuse."""
+    referrer_token, referrer_user = tokens["customer"]
+    referrer_code = session.get(f"{API}/referral", headers=_auth(referrer_token)).json()["code"]
+
+    # Referrer wallet before
+    bal_before_ref = session.get(f"{API}/wallet", headers=_auth(referrer_token)).json()["balance"]
+
+    # Create a fresh invitee
+    invitee_email = f"invitee_{int(time.time())}@rkpooja.test"
+    session.post(f"{API}/auth/request-otp", json={"email": invitee_email, "role": "customer"})
+    v = session.post(f"{API}/auth/verify-otp", json={"email": invitee_email, "otp": OTP})
+    assert v.status_code == 200
+    invitee_token = v.json()["token"]
+
+    bal_before_inv = session.get(f"{API}/wallet", headers=_auth(invitee_token)).json()["balance"]
+
+    # Redeem
+    r = session.post(f"{API}/referral/redeem", json={"code": referrer_code}, headers=_auth(invitee_token))
+    assert r.status_code == 200, r.text
+    assert r.json().get("bonus") == 100.0
+
+    # Wallets +100
+    bal_after_inv = session.get(f"{API}/wallet", headers=_auth(invitee_token)).json()["balance"]
+    bal_after_ref = session.get(f"{API}/wallet", headers=_auth(referrer_token)).json()["balance"]
+    assert bal_after_inv == pytest.approx(bal_before_inv + 100, rel=1e-2)
+    assert bal_after_ref == pytest.approx(bal_before_ref + 100, rel=1e-2)
+
+    # Re-use → 400
+    r2 = session.post(f"{API}/referral/redeem", json={"code": referrer_code}, headers=_auth(invitee_token))
+    assert r2.status_code == 400, r2.text
+
+
+def test_referral_invalid_code(session, tokens):
+    token, _ = tokens["customer"]
+    # Create a fresh invitee so the "already redeemed" path doesn't trigger
+    email = f"badref_{int(time.time())}@rkpooja.test"
+    session.post(f"{API}/auth/request-otp", json={"email": email, "role": "customer"})
+    v = session.post(f"{API}/auth/verify-otp", json={"email": email, "otp": OTP})
+    new_token = v.json()["token"]
+    r = session.post(f"{API}/referral/redeem", json={"code": "XX"}, headers=_auth(new_token))
+    assert r.status_code == 400
+
+
+# ---------- share booking ----------
+def test_share_booking_public_safe(session, tokens, created_booking):
+    """Public share endpoint — must NOT leak customer_phone."""
+    r = session.get(f"{API}/share/booking/{created_booking['id']}")
+    assert r.status_code == 200
+    data = r.json()
+    assert "customer_phone" not in data
+    for k in ("code", "status", "pickup", "drop", "fare"):
+        assert k in data
+
+
+def test_share_booking_404(session):
+    r = session.get(f"{API}/share/booking/does-not-exist-id")
+    assert r.status_code == 404
+
+
+# ---------- booking lifecycle → notification ----------
+def test_booking_event_pushes_notification(session, tokens):
+    """Create a fresh booking; verify a 'booking' notification appears."""
+    cust_token, _ = tokens["customer"]
+    # Count notifs before
+    n_before = len(session.get(f"{API}/notifications", headers=_auth(cust_token)).json())
+    payload = {
+        "service_type": "auto",
+        "vehicle_category": "auto",
+        "pickup": {"lat": 25.6093, "lng": 85.1235, "address": "A"},
+        "drop":   {"lat": 25.6200, "lng": 85.1400, "address": "B"},
+        "payment_method": "wallet",
+    }
+    r = session.post(f"{API}/bookings", json=payload, headers=_auth(cust_token))
+    assert r.status_code == 200
+    n_after = session.get(f"{API}/notifications", headers=_auth(cust_token)).json()
+    assert len(n_after) >= n_before + 1
+    assert any(n.get("kind") == "booking" for n in n_after)

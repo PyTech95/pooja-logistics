@@ -1,0 +1,20 @@
+{
+  "name": "RK POOJA — One App. All Rides.",
+  "short_name": "RK POOJA",
+  "description": "India's mobility super app — cars, autos, bikes, tempos, buses, porter & goods. One app. All rides.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F8FAFC",
+  "theme_color": "#0A2E6D",
+  "icons": [
+    {
+      "src": "https://customer-assets.emergentagent.com/job_pooja-logistics/artifacts/8rufbbur_image.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["travel", "transportation", "navigation"]
+}

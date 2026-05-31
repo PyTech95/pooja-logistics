@@ -12,11 +12,14 @@ import { Login } from "@/pages/Login";
 import { CustomerLayout } from "@/pages/customer/CustomerLayout";
 import { CustomerHome } from "@/pages/customer/CustomerHome";
 import { BookRide } from "@/pages/customer/BookRide";
+import { BusBooking } from "@/pages/customer/BusBooking";
 import { TrackBooking } from "@/pages/customer/TrackBooking";
 import { Trips } from "@/pages/customer/Trips";
 import { Wallet } from "@/pages/customer/Wallet";
 import { AIAssistant } from "@/pages/customer/AIAssistant";
 import { Profile } from "@/pages/customer/Profile";
+import { Referral } from "@/pages/customer/Referral";
+import { Notifications } from "@/pages/customer/Notifications";
 
 import { DriverLayout } from "@/pages/driver/DriverLayout";
 import { DriverHome } from "@/pages/driver/DriverHome";
@@ -61,12 +64,15 @@ function App() {
           {/* Customer */}
           <Route path="/app" element={<ProtectedRoute roles={["customer"]}><CustomerLayout /></ProtectedRoute>}>
             <Route index element={<CustomerHome />} />
+            <Route path="book/bus" element={<BusBooking />} />
             <Route path="book/:service" element={<BookRide />} />
             <Route path="track/:id" element={<TrackBooking />} />
             <Route path="trips" element={<Trips />} />
             <Route path="wallet" element={<Wallet />} />
             <Route path="ai" element={<AIAssistant />} />
             <Route path="profile" element={<Profile />} />
+            <Route path="referral" element={<Referral />} />
+            <Route path="notifications" element={<Notifications />} />
           </Route>
 
           {/* Driver */}

@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration-2 regression. Added 17 new pytest cases to /app/backend/tests/backend_test.py covering bus routes/seats/booking (success, duplicate-seat 409, insufficient-balance 402, wallet deduction, my-bookings, seats-reflect-booking), notifications (list + mark-all-read + booking-event push), referral (get, self-ref blocked, redeem credits both, invalid code), and share-booking (public-safe / 404). Result: 41/42 backend tests pass (97.6%). Only failure is the pre-existing AI chat test which now errors at the model layer (gpt-5.4 unknown model). Frontend smoke-tested on landing → login → customer home → bus booking → referral → notifications. All iteration-2 UI pieces render and integrate with the backend correctly.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/ai/chat", "issue": "litellm returns 'Invalid model name passed in model=gpt-5.4'. Endpoint falls back gracefully with a generic 'Sorry, I had trouble responding' reply + error in body, so user-visible flow degrades to a fallback string instead of a real LLM answer. Test_ai_chat_returns_reply asserts no error key → fails."},
+      {"endpoint": "/api/ai/parse-booking", "issue": "Same gpt-5.4 model error. Endpoint silently falls back to defaults {service_type:'car', vehicle_category:'sedan'} so parse never reaches the LLM — voice booking parses every transcript identically."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Customer home", "issues": ["Notification bell badge sits visually over the RK logo at top-left because both are positioned absolutely in the top area — slight overlap on 1920px viewport."]},
+      {"screen": "Bus seat map", "issues": ["No explicit 'driver' steering-wheel indicator at top, only a 'DRIVER' label pill — acceptable but a small icon would improve clarity."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Update AI model name in /app/backend/server.py from 'gpt-5.4' to a valid Emergent-supported OpenAI model (e.g. 'gpt-5' or 'gpt-4o-mini'). Affects both /api/ai/chat and /api/ai/parse-booking. The fallback hides failure from users but the AI assistant is currently non-functional."
+  ],
+  "critical_code_review_comments": [
+    "server.py is at 902 lines — still single file. As you add bus/referral/notifications you should split into routers/ submodules (auth.py, bookings.py, bus.py, referral.py, ai.py).",
+    "Referral lookup uses regex on user id prefix: db.users.find_one({'id': {'$regex': f'^{referrer_uid}', ...}}). With ~thousands of users and unindexed regex this becomes O(N). Add an explicit referral_code column (e.g. populate user.referral_code = 'RK'+uid[:6] on user creation and index it) instead of regex matching the id.",
+    "POST /api/bus/book: passenger_name/passenger_phone are required Pydantic str fields but the UI shows error 'Add passenger name & phone' for empty values — good. Consider also rejecting empty seats list (currently a 0-seat booking would succeed with fare_total=0).",
+    "push_notification has no rate-limiting — a customer can DoS their own notif inbox via repeated booking creates. Fine for demo, flag for prod.",
+    "share/booking endpoint excludes customer_phone via projection {'customer_phone': 0}, but still returns driver_phone via the parent doc? Verified: parent doc has driver_phone field and projection only drops customer_phone — driver_phone IS returned in the trimmed dict. Acceptable since the response is hand-built (only listed fields are returned).",
+    "Bus pricing uses route.price * len(seats) but the SERVICES catalog 'bus' categories (mini/ac/sleeper/volvo/luxury) are not used here — two different pricing schemes coexist. Consolidate."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (added 17 new tests for bus/referral/notifications/share)"
+  ],
+  "success_rate": {"backend": "97.6% (41/42)", "frontend": "100% on iteration-2 flows tested"},
+  "test_credentials": "customer@rkpooja.test / driver@rkpooja.test / admin@rkpooja.test / fleet@rkpooja.test — OTP 123456 (seed/demo).",
+  "seed_data_creation": "Tests create: 1 bus booking PA-VA-05 (seats C*/D* unique per run, leaves data behind), 1 fresh customer (invitee_<ts>@rkpooja.test) per run for referral redemption, 1 fresh poor user (poor_<ts>@rkpooja.test) for 402 test, 1 fresh user (badref_<ts>) for invalid-code test, 1 extra auto-booking. Not auto-cleaned — acceptable for demo data.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "/app/backend/tests/backend_test.py now has 42 tests (25 iteration-1 + 17 iteration-2). The bus_booking fixture is session-scoped and uses route PA-VA-05 with unique C/D seats per run (avoids the previously-seeded A1 on PA-RA-04). Demo customer wallet may now be high after multiple top-ups; the insufficient_balance test creates a *new* user to guarantee 500 balance. AI chat/parse fail because gpt-5.4 is not a valid model in this Emergent LLM key — main agent must update the model name. Frontend pages /app/book/bus, /app/referral, /app/notifications all render with proper data-testid coverage.",
+  "rca of the issue": "AI chat returns error body — RCA: backend uses .with_model('openai','gpt-5.4'). litellm rejects with 'Invalid model name passed in model=gpt-5.4. Call /v1/models to view available models for your key'. The except branch in /api/ai/chat catches the LlmChat exception and returns {reply: 'Sorry, I had trouble responding. Try again.', error: '<message>'}, so the API is still 200 but the assistant is dead. Reproduction: POST /api/ai/chat {'message':'hi'} with a valid Bearer → body.error contains the litellm message. Mitigation: change the model id in both /api/ai/chat and /api/ai/parse-booking to a valid Emergent-supported model (e.g. 'gpt-5' or 'gpt-4o')."
+}

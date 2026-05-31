@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Car, Bike, Truck, Bus, Plane, MapPin, Search, Mic,
-  Sparkles, Wallet as WalletIcon, Bell, Map as MapIcon, Package, Globe, Sun, Moon
+  Sparkles, Wallet as WalletIcon, Bell, Map as MapIcon, Package, Globe, Sun, Moon, Gift,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
@@ -29,8 +29,13 @@ export const CustomerHome = () => {
   const [voice, setVoice] = useState("");
   const [parsing, setParsing] = useState(false);
   const [dark, setDark] = useState(document.documentElement.classList.contains("dark"));
+  const [unread, setUnread] = useState(0);
 
-  useEffect(() => { refresh().catch(() => {}); /* eslint-disable-next-line */ }, []);
+  useEffect(() => {
+    refresh().catch(() => {});
+    api.get("/notifications").then(r => setUnread((r.data || []).filter(n => !n.read).length)).catch(() => {});
+    /* eslint-disable-next-line */
+  }, []);
 
   const toggleDark = () => {
     const next = !dark; setDark(next);
@@ -60,7 +65,14 @@ export const CustomerHome = () => {
           <Button variant="ghost" size="icon" onClick={toggleDark} data-testid="theme-toggle">
             {dark ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
           </Button>
-          <Button variant="ghost" size="icon" data-testid="notifications-btn"><Bell className="h-5 w-5" /></Button>
+          <Button variant="ghost" size="icon" onClick={() => nav("/app/notifications")} data-testid="notifications-btn" className="relative">
+            <Bell className="h-5 w-5" />
+            {unread > 0 && (
+              <span className="absolute top-1.5 right-1.5 h-4 min-w-4 px-1 rounded-full bg-flame text-white text-[9px] font-bold grid place-items-center">
+                {unread > 9 ? "9+" : unread}
+              </span>
+            )}
+          </Button>
         </div>
       </div>
 
@@ -73,19 +85,25 @@ export const CustomerHome = () => {
         <p className="text-sm text-muted-foreground mt-1">Where would you like to go?</p>
       </div>
 
-      {/* Wallet + AI quick cards */}
-      <div className="mt-5 grid grid-cols-2 gap-3">
-        <div className="border border-border rounded-2xl p-4 bg-card" onClick={() => nav("/app/wallet")}>
+      {/* Wallet + AI + Referral cards */}
+      <div className="mt-5 grid grid-cols-3 gap-3">
+        <button onClick={() => nav("/app/wallet")} className="text-left border border-border rounded-2xl p-4 bg-card hover:-translate-y-0.5 transition-all" data-testid="quick-wallet">
           <WalletIcon className="h-5 w-5 text-flame" />
           <div className="label-eyebrow mt-3">Wallet</div>
-          <div className="font-display font-black text-2xl mt-1" data-testid="home-wallet-balance">₹{(user?.wallet_balance || 0).toFixed(0)}</div>
-        </div>
-        <div className="border border-border rounded-2xl p-4 bg-card relative overflow-hidden" onClick={() => nav("/app/ai")}>
+          <div className="font-display font-black text-xl mt-1" data-testid="home-wallet-balance">₹{(user?.wallet_balance || 0).toFixed(0)}</div>
+        </button>
+        <button onClick={() => nav("/app/ai")} className="text-left border border-border rounded-2xl p-4 bg-card relative overflow-hidden hover:-translate-y-0.5 transition-all" data-testid="quick-ai">
           <Sparkles className="h-5 w-5 text-flame" />
-          <div className="label-eyebrow mt-3">AI Assistant</div>
-          <div className="font-display font-bold text-base mt-1">Ask anything</div>
+          <div className="label-eyebrow mt-3">AI Assist</div>
+          <div className="font-display font-bold text-sm mt-1">Ask me</div>
           <div className="absolute -right-4 -bottom-4 h-16 w-16 rounded-full bg-flame/10 blur-xl" />
-        </div>
+        </button>
+        <button onClick={() => nav("/app/referral")} className="text-left border border-border rounded-2xl p-4 bg-brand text-white relative overflow-hidden hover:-translate-y-0.5 transition-all" data-testid="quick-referral">
+          <Gift className="h-5 w-5 text-flame" />
+          <div className="label-eyebrow text-white/60 mt-3">Earn</div>
+          <div className="font-display font-bold text-sm mt-1">₹100/invite</div>
+          <div className="absolute -right-4 -bottom-4 h-16 w-16 rounded-full bg-flame/20 blur-xl" />
+        </button>
       </div>
 
       {/* AI Voice booking */}

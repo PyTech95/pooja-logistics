@@ -159,6 +159,12 @@ class RatingReq(BaseModel):
     rating: int
     review: Optional[str] = ""
 
+class NotifyMark(BaseModel):
+    id: str
+
+class ReferralRedeem(BaseModel):
+    code: str
+
 # ============================================================
 # SERVICE CATALOG & PRICING
 # ============================================================
@@ -370,6 +376,7 @@ async def create_booking(req: BookingCreate, user=Depends(get_current_user)):
         "updated_at": now_iso(),
     }
     await db.bookings.insert_one({**booking})
+    await push_notification(user["id"], "Searching driver…", f"Booking {booking['code']} created · we're matching the best driver.", "booking")
     booking.pop("_id", None)
     return booking
 
@@ -419,6 +426,16 @@ async def update_booking_status(booking_id: str, req: BookingStatusUpdate, user=
             "type": "trip", "created_at": now_iso(),
         })
     await db.bookings.update_one({"id": booking_id}, {"$set": update})
+    # Notify customer on state changes
+    if req.status in ("accepted", "arrived", "started", "completed", "cancelled"):
+        msg = {
+            "accepted":  f"Driver {update.get('driver_name','')} accepted your trip · PIN {b.get('otp','')}",
+            "arrived":   "Your driver has arrived 🚖",
+            "started":   "Trip started · enjoy the ride!",
+            "completed": "Trip completed · rate your driver to help others.",
+            "cancelled": "Booking cancelled",
+        }[req.status]
+        await push_notification(b["customer_id"], "Booking update", msg, "booking")
     b2 = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     return b2
 
@@ -725,6 +742,146 @@ async def seed_demo():
 @api.get("/health")
 async def health():
     return {"status": "ok", "time": now_iso()}
+
+# ============================================================
+# NOTIFICATIONS, REFERRALS, BUS SEATS, TRIP SHARE
+# ============================================================
+async def push_notification(user_id: str, title: str, body: str, kind: str = "info"):
+    await db.notifications.insert_one({
+        "id": new_id(), "user_id": user_id, "title": title, "body": body,
+        "kind": kind, "read": False, "created_at": now_iso(),
+    })
+
+@api.get("/notifications")
+async def list_notifications(user=Depends(get_current_user)):
+    docs = await db.notifications.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
+    return docs
+
+@api.post("/notifications/read-all")
+async def mark_all_read(user=Depends(get_current_user)):
+    await db.notifications.update_many({"user_id": user["id"]}, {"$set": {"read": True}})
+    return {"ok": True}
+
+@api.get("/referral")
+async def my_referral(user=Depends(get_current_user)):
+    code = "RK" + user["id"][:6].upper()
+    used = await db.referrals.find({"referrer_id": user["id"]}, {"_id": 0}).to_list(100)
+    return {
+        "code": code,
+        "share_url": f"https://rkpooja.app/r/{code}",
+        "share_text": f"Get ₹100 free on RK POOJA — India's One App for ALL Rides. Use my code {code} 🚗",
+        "earned": sum(r.get("bonus", 0) for r in used),
+        "successful_invites": len(used),
+        "history": used,
+    }
+
+@api.post("/referral/redeem")
+async def redeem_referral(req: ReferralRedeem, user=Depends(get_current_user)):
+    code = req.code.strip().upper()
+    if not code.startswith("RK") or len(code) < 4:
+        raise HTTPException(400, "Invalid code")
+    # Check if user already redeemed any referral
+    existing = await db.referrals.find_one({"invitee_id": user["id"]})
+    if existing:
+        raise HTTPException(400, "Referral already redeemed")
+    referrer_uid = code[2:].lower()
+    referrer = await db.users.find_one({"id": {"$regex": f"^{referrer_uid}", "$options": "i"}})
+    if not referrer or referrer["id"] == user["id"]:
+        raise HTTPException(404, "Referrer not found")
+    bonus = 100.0
+    await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": bonus}})
+    await db.users.update_one({"id": referrer["id"]}, {"$inc": {"wallet_balance": bonus}})
+    await db.referrals.insert_one({
+        "id": new_id(), "code": code, "referrer_id": referrer["id"],
+        "invitee_id": user["id"], "invitee_name": user["name"], "bonus": bonus,
+        "created_at": now_iso(),
+    })
+    await push_notification(referrer["id"], "Referral reward 🎉", f"{user['name']} joined using your code — ₹{bonus} credited!", "reward")
+    await push_notification(user["id"], "Welcome bonus 🎉", f"₹{bonus} added to your wallet via referral", "reward")
+    return {"ok": True, "bonus": bonus}
+
+@api.get("/bus/routes")
+async def bus_routes():
+    """Static bus inventory for demo."""
+    routes = [
+        {"id": "PA-DL-01", "from": "Patna", "to": "Delhi", "departure": "21:30", "arrival": "10:15", "duration": "12h 45m",
+         "operator": "Pooja Travels", "type": "ac", "price": 1450, "seats_total": 36, "seats_booked": 12},
+        {"id": "PA-MU-02", "from": "Patna", "to": "Mumbai", "departure": "19:00", "arrival": "08:30",  "duration": "13h 30m",
+         "operator": "RK Express", "type": "sleeper", "price": 1750, "seats_total": 30, "seats_booked": 9},
+        {"id": "PA-KO-03", "from": "Patna", "to": "Kolkata", "departure": "22:00", "arrival": "07:00", "duration": "9h 00m",
+         "operator": "Bharat Volvo", "type": "volvo", "price": 1850, "seats_total": 40, "seats_booked": 19},
+        {"id": "PA-RA-04", "from": "Patna", "to": "Ranchi", "departure": "23:15", "arrival": "06:45", "duration": "7h 30m",
+         "operator": "Pooja Travels", "type": "mini", "price": 700, "seats_total": 22, "seats_booked": 5},
+        {"id": "PA-VA-05", "from": "Patna", "to": "Varanasi", "departure": "06:00", "arrival": "11:30", "duration": "5h 30m",
+         "operator": "RK Express", "type": "luxury", "price": 950, "seats_total": 30, "seats_booked": 14},
+    ]
+    return {"routes": routes}
+
+class BusBookingCreate(BaseModel):
+    route_id: str
+    seats: List[str]   # ["A1","A2"]
+    passenger_name: str
+    passenger_phone: str
+    payment_method: str = "wallet"
+
+@api.post("/bus/book")
+async def bus_book(req: BusBookingCreate, user=Depends(get_current_user)):
+    # Use the same routes
+    routes_resp = await bus_routes()
+    route = next((r for r in routes_resp["routes"] if r["id"] == req.route_id), None)
+    if not route:
+        raise HTTPException(404, "Route not found")
+    # Block already booked seats (per route, ephemeral collection)
+    held = await db.bus_seats.find({"route_id": req.route_id, "seat": {"$in": req.seats}}, {"_id": 0}).to_list(100)
+    if held:
+        raise HTTPException(409, f"Seat(s) already booked: {[h['seat'] for h in held]}")
+    fare_total = route["price"] * len(req.seats)
+    if req.payment_method == "wallet" and (user.get("wallet_balance", 0) or 0) < fare_total:
+        raise HTTPException(402, "Insufficient wallet balance")
+    if req.payment_method == "wallet":
+        await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": -fare_total}})
+    booking_id = new_id()
+    code = "BUS" + "".join(random.choices("0123456789", k=6))
+    for s in req.seats:
+        await db.bus_seats.insert_one({"id": new_id(), "route_id": req.route_id, "seat": s,
+                                       "booking_id": booking_id, "user_id": user["id"]})
+    booking = {
+        "id": booking_id, "code": code, "user_id": user["id"],
+        "route_id": req.route_id, "route": route, "seats": req.seats,
+        "passenger_name": req.passenger_name, "passenger_phone": req.passenger_phone,
+        "fare_total": fare_total, "payment_method": req.payment_method,
+        "qr": f"RKPOOJA|{code}|{req.route_id}|{','.join(req.seats)}",
+        "status": "confirmed", "created_at": now_iso(),
+    }
+    await db.bus_bookings.insert_one({**booking})
+    await push_notification(user["id"], "Bus ticket booked 🎫", f"{route['from']} → {route['to']} · Seats {', '.join(req.seats)} · {code}", "ticket")
+    booking.pop("_id", None)
+    return booking
+
+@api.get("/bus/bookings")
+async def my_bus_bookings(user=Depends(get_current_user)):
+    return await db.bus_bookings.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(50)
+
+@api.get("/bus/route/{route_id}/seats")
+async def bus_route_seats(route_id: str):
+    booked = await db.bus_seats.find({"route_id": route_id}, {"_id": 0}).to_list(200)
+    return {"booked": [b["seat"] for b in booked]}
+
+@api.get("/share/booking/{booking_id}")
+async def share_booking(booking_id: str):
+    b = await db.bookings.find_one({"id": booking_id}, {"_id": 0, "customer_phone": 0})
+    if not b:
+        raise HTTPException(404, "Not found")
+    return {
+        "code": b.get("code"), "status": b.get("status"),
+        "pickup": b.get("pickup", {}).get("address"),
+        "drop": b.get("drop", {}).get("address"),
+        "driver_name": b.get("driver_name"),
+        "vehicle": b.get("vehicle"),
+        "fare": b.get("fare", {}).get("total"),
+        "live_lat": b.get("live_lat"),
+        "live_lng": b.get("live_lng"),
+    }
 
 # Register
 app.include_router(api)

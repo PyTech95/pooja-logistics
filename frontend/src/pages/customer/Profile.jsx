@@ -16,6 +16,7 @@ const LANGS = [
 
 export const Profile = () => {
   const { user, logout, refresh } = useAuth();
+  const nav = useNavigate();
   const [name, setName] = useState(user?.name || "");
   const [phone, setPhone] = useState(user?.phone || "");
   const [lang, setLang] = useState(user?.preferred_language || "en");
@@ -74,18 +75,18 @@ export const Profile = () => {
       </div>
 
       <div className="mt-7 grid grid-cols-3 gap-2">
-        <div className="border border-border rounded-xl p-3 text-center">
+        <button onClick={() => nav("/app/notifications")} className="border border-border rounded-xl p-3 text-center hover:border-flame transition-colors" data-testid="profile-alerts-btn">
           <Bell className="h-5 w-5 mx-auto text-flame mb-1"/>
           <div className="text-[11px] label-eyebrow">Alerts</div>
-        </div>
-        <div className="border border-border rounded-xl p-3 text-center">
+        </button>
+        <button onClick={() => nav("/app/referral")} className="border border-border rounded-xl p-3 text-center hover:border-flame transition-colors" data-testid="profile-refer-btn">
           <Gift className="h-5 w-5 mx-auto text-flame mb-1"/>
           <div className="text-[11px] label-eyebrow">Refer</div>
-        </div>
-        <div className="border border-border rounded-xl p-3 text-center">
+        </button>
+        <button className="border border-border rounded-xl p-3 text-center hover:border-flame transition-colors" data-testid="profile-rewards-btn">
           <Star className="h-5 w-5 mx-auto text-flame mb-1"/>
           <div className="text-[11px] label-eyebrow">Rewards</div>
-        </div>
+        </button>
       </div>
 
       <Button variant="outline" className="w-full mt-7 border-destructive text-destructive" onClick={logout} data-testid="logout-btn">
