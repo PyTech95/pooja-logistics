@@ -1,73 +1,733 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+import random
+import math
+import jwt
 import uuid
-from datetime import datetime, timezone
+from pathlib import Path
+from pydantic import BaseModel, Field, EmailStr
+from typing import List, Optional, Literal, Dict, Any
+from datetime import datetime, timezone, timedelta
 
-
+# Load env
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
-app = FastAPI()
+JWT_SECRET = os.environ.get('JWT_SECRET', 'rk-pooja-dev-secret')
+JWT_ALGO = 'HS256'
+EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
+app = FastAPI(title="RK POOJA Super App API")
+api = APIRouter(prefix="/api")
 
+# ============================================================
+# UTILITIES
+# ============================================================
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+def new_id():
+    return str(uuid.uuid4())
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
-async def root():
-    return {"message": "Hello World"}
+def create_token(payload: dict) -> str:
+    payload = {**payload, "exp": datetime.now(timezone.utc) + timedelta(days=30)}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+def decode_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+async def get_current_user(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = authorization.replace("Bearer ", "").strip()
+    data = decode_token(token)
+    user = await db.users.find_one({"id": data.get("user_id")}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
-# Include the router in the main app
-app.include_router(api_router)
+def require_role(roles: list):
+    async def _check(user=Depends(get_current_user)):
+        if user.get("role") not in roles:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return user
+    return _check
+
+# ============================================================
+# MODELS
+# ============================================================
+class RequestOTP(BaseModel):
+    email: str
+    role: Literal["customer", "driver", "admin", "fleet"] = "customer"
+    name: Optional[str] = None
+
+class VerifyOTP(BaseModel):
+    email: str
+    otp: str
+
+class FareEstimateReq(BaseModel):
+    service_type: str
+    vehicle_category: Optional[str] = None
+    pickup_lat: float
+    pickup_lng: float
+    drop_lat: float
+    drop_lng: float
+
+class Location(BaseModel):
+    lat: float
+    lng: float
+    address: Optional[str] = ""
+
+class BookingCreate(BaseModel):
+    service_type: str  # car, auto, bike, tempo, bus, porter, goods, airport, outstation
+    vehicle_category: Optional[str] = None  # mini/sedan/suv/etc
+    pickup: Location
+    drop: Location
+    scheduled_at: Optional[str] = None
+    notes: Optional[str] = None
+    payment_method: str = "wallet"  # wallet, cash, upi, card
+    passenger_count: Optional[int] = 1
+    package_details: Optional[Dict[str, Any]] = None
+
+class BookingStatusUpdate(BaseModel):
+    status: str  # accepted, arrived, started, completed, cancelled
+
+class LocationUpdate(BaseModel):
+    lat: float
+    lng: float
+
+class WalletTopup(BaseModel):
+    amount: float
+
+class ChatMessageReq(BaseModel):
+    session_id: Optional[str] = None
+    message: str
+
+class VoiceBookingParse(BaseModel):
+    transcript: str
+
+class KYCUpdate(BaseModel):
+    aadhaar: Optional[str] = None
+    pan: Optional[str] = None
+    driving_license: Optional[str] = None
+    vehicle_rc: Optional[str] = None
+    insurance: Optional[str] = None
+    selfie_url: Optional[str] = None
+    vehicle_make: Optional[str] = None
+    vehicle_model: Optional[str] = None
+    vehicle_number: Optional[str] = None
+    vehicle_type: Optional[str] = None  # car, auto, bike, truck
+
+class OnlineToggle(BaseModel):
+    online: bool
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+
+class VehicleCreate(BaseModel):
+    make: str
+    model: str
+    number: str
+    type: str
+    capacity: Optional[int] = None
+    driver_email: Optional[str] = None
+
+class PromoCreate(BaseModel):
+    code: str
+    discount_percent: float
+    max_discount: float = 100.0
+    active: bool = True
+
+class RatingReq(BaseModel):
+    rating: int
+    review: Optional[str] = ""
+
+# ============================================================
+# SERVICE CATALOG & PRICING
+# ============================================================
+SERVICES = {
+    "car": {
+        "name": "Car Ride",
+        "categories": {
+            "mini":    {"name": "Mini",    "base": 50,  "per_km": 12, "per_min": 1.5, "capacity": 4},
+            "sedan":   {"name": "Sedan",   "base": 70,  "per_km": 14, "per_min": 1.8, "capacity": 4},
+            "suv":     {"name": "SUV",     "base": 100, "per_km": 18, "per_min": 2.0, "capacity": 6},
+            "premium": {"name": "Premium", "base": 150, "per_km": 22, "per_min": 2.5, "capacity": 4},
+            "luxury":  {"name": "Luxury",  "base": 250, "per_km": 30, "per_min": 3.0, "capacity": 4},
+            "ev":      {"name": "Electric","base": 60,  "per_km": 13, "per_min": 1.5, "capacity": 4},
+        },
+    },
+    "auto":   {"name": "Auto Rickshaw","categories": {"auto": {"name": "Auto", "base": 30, "per_km": 10, "per_min": 1.0, "capacity": 3}}},
+    "bike":   {"name": "Bike",         "categories": {"bike": {"name": "Bike", "base": 20, "per_km": 6,  "per_min": 0.8, "capacity": 1}}},
+    "tempo":  {"name": "Tempo Traveller","categories": {
+        "9s":  {"name": "9 Seater",  "base": 800,  "per_km": 18, "per_min": 0, "capacity": 9},
+        "12s": {"name": "12 Seater", "base": 1100, "per_km": 22, "per_min": 0, "capacity": 12},
+        "17s": {"name": "17 Seater", "base": 1500, "per_km": 26, "per_min": 0, "capacity": 17},
+        "20s": {"name": "20 Seater", "base": 1800, "per_km": 30, "per_min": 0, "capacity": 20},
+        "26s": {"name": "26 Seater", "base": 2200, "per_km": 35, "per_min": 0, "capacity": 26},
+    }},
+    "bus": {"name": "Bus Booking", "categories": {
+        "mini":     {"name": "Mini Bus",    "base": 2500, "per_km": 35, "per_min": 0, "capacity": 22},
+        "ac":       {"name": "AC Bus",      "base": 3500, "per_km": 45, "per_min": 0, "capacity": 35},
+        "sleeper":  {"name": "Sleeper Bus", "base": 4500, "per_km": 55, "per_min": 0, "capacity": 30},
+        "volvo":    {"name": "Volvo",       "base": 5500, "per_km": 65, "per_min": 0, "capacity": 40},
+        "luxury":   {"name": "Luxury Bus",  "base": 6500, "per_km": 75, "per_min": 0, "capacity": 30},
+    }},
+    "porter": {"name": "Porter / Delivery", "categories": {
+        "bike":     {"name": "Bike Delivery", "base": 40,  "per_km": 8,  "per_min": 0, "capacity": 1},
+        "tata_ace": {"name": "Tata Ace",      "base": 250, "per_km": 18, "per_min": 0, "capacity": 1},
+        "mini_truck":{"name":"Mini Truck",    "base": 400, "per_km": 25, "per_min": 0, "capacity": 1},
+    }},
+    "goods": {"name": "Goods Transport", "categories": {
+        "pickup":   {"name": "Pickup Truck", "base": 500,  "per_km": 28, "per_min": 0, "capacity": 1},
+        "truck":    {"name": "Truck",        "base": 1200, "per_km": 45, "per_min": 0, "capacity": 1},
+        "container":{"name": "Container",    "base": 2500, "per_km": 75, "per_min": 0, "capacity": 1},
+        "heavy":    {"name": "Heavy Vehicle","base": 4000, "per_km": 95, "per_min": 0, "capacity": 1},
+    }},
+    "airport": {"name": "Airport Transfer", "categories": {
+        "sedan":  {"name": "Sedan",  "base": 250, "per_km": 16, "per_min": 1.5, "capacity": 4},
+        "suv":    {"name": "SUV",    "base": 400, "per_km": 22, "per_min": 2.0, "capacity": 6},
+        "luxury": {"name": "Luxury", "base": 700, "per_km": 32, "per_min": 3.0, "capacity": 4},
+    }},
+    "outstation": {"name": "Outstation", "categories": {
+        "sedan_oneway":  {"name": "Sedan One Way",  "base": 0, "per_km": 13, "per_min": 0, "capacity": 4},
+        "sedan_round":   {"name": "Sedan Round",    "base": 300, "per_km": 11, "per_min": 0, "capacity": 4},
+        "suv_oneway":    {"name": "SUV One Way",    "base": 0, "per_km": 18, "per_min": 0, "capacity": 6},
+        "suv_round":     {"name": "SUV Round",      "base": 500, "per_km": 16, "per_min": 0, "capacity": 6},
+    }},
+}
+
+def compute_fare(service_type: str, category: str, distance_km: float, eta_min: float = 0) -> Dict[str, Any]:
+    svc = SERVICES.get(service_type)
+    if not svc:
+        raise HTTPException(400, f"Unknown service: {service_type}")
+    cat_key = category or list(svc["categories"].keys())[0]
+    cat = svc["categories"].get(cat_key)
+    if not cat:
+        raise HTTPException(400, f"Unknown category: {category}")
+    base = cat["base"]
+    dist_cost = distance_km * cat["per_km"]
+    time_cost = eta_min * cat["per_min"]
+    # surge: simple time-based
+    hr = datetime.now(timezone.utc).hour
+    surge = 1.0
+    if hr in (8, 9, 18, 19, 20):
+        surge = 1.3
+    subtotal = (base + dist_cost + time_cost) * surge
+    gst = subtotal * 0.05
+    total = round(subtotal + gst, 2)
+    return {
+        "service_type": service_type,
+        "category": cat_key,
+        "category_name": cat["name"],
+        "distance_km": round(distance_km, 2),
+        "eta_min": round(eta_min, 1),
+        "base": base,
+        "distance_cost": round(dist_cost, 2),
+        "time_cost": round(time_cost, 2),
+        "surge": surge,
+        "gst": round(gst, 2),
+        "total": total,
+        "currency": "INR",
+    }
+
+# ============================================================
+# AUTH
+# ============================================================
+@api.post("/auth/request-otp")
+async def request_otp(data: RequestOTP):
+    otp = "{:06d}".format(random.randint(0, 999999))
+    # Demo: deterministic OTP for known test accounts
+    if data.email.endswith("@rkpooja.test"):
+        otp = "123456"
+    await db.otps.update_one(
+        {"email": data.email},
+        {"$set": {"otp": otp, "role": data.role, "name": data.name or "", "created_at": now_iso()}},
+        upsert=True,
+    )
+    # For dev we return OTP (also so customer can see and verify); production: send via email/sms
+    return {"sent": True, "otp": otp, "note": "Demo mode: OTP returned in response"}
+
+@api.post("/auth/verify-otp")
+async def verify_otp(data: VerifyOTP):
+    rec = await db.otps.find_one({"email": data.email}, {"_id": 0})
+    if not rec or rec.get("otp") != data.otp:
+        raise HTTPException(401, "Invalid OTP")
+    user = await db.users.find_one({"email": data.email}, {"_id": 0})
+    if not user:
+        user = {
+            "id": new_id(),
+            "email": data.email,
+            "name": rec.get("name") or data.email.split("@")[0].title(),
+            "role": rec.get("role") or "customer",
+            "phone": "",
+            "wallet_balance": 500.0,  # signup bonus
+            "rating": 5.0,
+            "trips": 0,
+            "online": False,
+            "current_lat": None,
+            "current_lng": None,
+            "kyc_status": "pending",
+            "kyc": {},
+            "vehicle": {},
+            "preferred_language": "en",
+            "created_at": now_iso(),
+        }
+        await db.users.insert_one({**user})
+    await db.otps.delete_one({"email": data.email})
+    token = create_token({"user_id": user["id"], "role": user["role"]})
+    user.pop("_id", None)
+    return {"token": token, "user": user}
+
+@api.get("/auth/me")
+async def me(user=Depends(get_current_user)):
+    user.pop("_id", None)
+    return user
+
+@api.patch("/auth/profile")
+async def update_profile(data: Dict[str, Any], user=Depends(get_current_user)):
+    allowed = {"name", "phone", "preferred_language"}
+    update = {k: v for k, v in data.items() if k in allowed}
+    if update:
+        await db.users.update_one({"id": user["id"]}, {"$set": update})
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return u
+
+# ============================================================
+# SERVICES & PRICING
+# ============================================================
+@api.get("/services")
+async def list_services():
+    return {"services": SERVICES}
+
+@api.post("/fare/estimate")
+async def fare_estimate(req: FareEstimateReq):
+    dist = haversine(req.pickup_lat, req.pickup_lng, req.drop_lat, req.drop_lng)
+    eta = dist * 2.5  # ~2.5 min per km in city
+    if req.vehicle_category:
+        return compute_fare(req.service_type, req.vehicle_category, dist, eta)
+    # return all categories
+    svc = SERVICES.get(req.service_type)
+    if not svc:
+        raise HTTPException(400, "Unknown service")
+    estimates = []
+    for cat_key in svc["categories"].keys():
+        estimates.append(compute_fare(req.service_type, cat_key, dist, eta))
+    return {"distance_km": round(dist, 2), "eta_min": round(eta, 1), "estimates": estimates}
+
+# ============================================================
+# BOOKINGS
+# ============================================================
+@api.post("/bookings")
+async def create_booking(req: BookingCreate, user=Depends(get_current_user)):
+    dist = haversine(req.pickup.lat, req.pickup.lng, req.drop.lat, req.drop.lng)
+    eta = dist * 2.5
+    fare = compute_fare(req.service_type, req.vehicle_category, dist, eta)
+    booking = {
+        "id": new_id(),
+        "code": "RK" + "".join(random.choices("0123456789", k=6)),
+        "customer_id": user["id"],
+        "customer_name": user["name"],
+        "customer_phone": user.get("phone", ""),
+        "driver_id": None,
+        "driver_name": None,
+        "driver_phone": None,
+        "vehicle": None,
+        "service_type": req.service_type,
+        "vehicle_category": fare["category"],
+        "pickup": req.pickup.dict(),
+        "drop": req.drop.dict(),
+        "scheduled_at": req.scheduled_at,
+        "notes": req.notes or "",
+        "passenger_count": req.passenger_count,
+        "package_details": req.package_details,
+        "payment_method": req.payment_method,
+        "fare": fare,
+        "status": "requested",  # requested -> accepted -> arrived -> started -> completed | cancelled
+        "live_lat": None,
+        "live_lng": None,
+        "otp": "{:04d}".format(random.randint(0, 9999)),
+        "rating": None,
+        "review": None,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.bookings.insert_one({**booking})
+    booking.pop("_id", None)
+    return booking
+
+@api.get("/bookings")
+async def list_my_bookings(user=Depends(get_current_user)):
+    q = {"customer_id": user["id"]} if user["role"] == "customer" else {"driver_id": user["id"]}
+    docs = await db.bookings.find(q, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return docs
+
+@api.get("/bookings/{booking_id}")
+async def get_booking(booking_id: str, user=Depends(get_current_user)):
+    b = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not b:
+        raise HTTPException(404, "Not found")
+    return b
+
+@api.patch("/bookings/{booking_id}/status")
+async def update_booking_status(booking_id: str, req: BookingStatusUpdate, user=Depends(get_current_user)):
+    b = await db.bookings.find_one({"id": booking_id})
+    if not b:
+        raise HTTPException(404, "Not found")
+    update = {"status": req.status, "updated_at": now_iso()}
+    # Driver acceptance
+    if req.status == "accepted" and user["role"] == "driver":
+        update.update({
+            "driver_id": user["id"],
+            "driver_name": user["name"],
+            "driver_phone": user.get("phone", ""),
+            "vehicle": user.get("vehicle") or {},
+            "live_lat": user.get("current_lat"),
+            "live_lng": user.get("current_lng"),
+        })
+    if req.status == "completed":
+        # Deduct from customer wallet, credit driver
+        fare_total = b["fare"]["total"]
+        commission = round(fare_total * 0.20, 2)
+        driver_earning = round(fare_total - commission, 2)
+        if b.get("payment_method") == "wallet":
+            await db.users.update_one({"id": b["customer_id"]}, {"$inc": {"wallet_balance": -fare_total, "trips": 1}})
+        else:
+            await db.users.update_one({"id": b["customer_id"]}, {"$inc": {"trips": 1}})
+        if b.get("driver_id"):
+            await db.users.update_one({"id": b["driver_id"]}, {"$inc": {"wallet_balance": driver_earning, "trips": 1}})
+        await db.transactions.insert_one({
+            "id": new_id(), "booking_id": booking_id, "amount": fare_total,
+            "commission": commission, "driver_earning": driver_earning,
+            "type": "trip", "created_at": now_iso(),
+        })
+    await db.bookings.update_one({"id": booking_id}, {"$set": update})
+    b2 = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    return b2
+
+@api.post("/bookings/{booking_id}/location")
+async def update_booking_location(booking_id: str, req: LocationUpdate, user=Depends(get_current_user)):
+    await db.bookings.update_one(
+        {"id": booking_id, "driver_id": user["id"]},
+        {"$set": {"live_lat": req.lat, "live_lng": req.lng, "updated_at": now_iso()}},
+    )
+    return {"ok": True}
+
+@api.post("/bookings/{booking_id}/rate")
+async def rate_booking(booking_id: str, req: RatingReq, user=Depends(get_current_user)):
+    await db.bookings.update_one(
+        {"id": booking_id, "customer_id": user["id"]},
+        {"$set": {"rating": req.rating, "review": req.review or ""}},
+    )
+    b = await db.bookings.find_one({"id": booking_id})
+    if b and b.get("driver_id"):
+        drv = await db.users.find_one({"id": b["driver_id"]})
+        if drv:
+            cur = drv.get("rating", 5.0) or 5.0
+            new_r = round((cur * 0.85 + req.rating * 0.15), 2)
+            await db.users.update_one({"id": b["driver_id"]}, {"$set": {"rating": new_r}})
+    return {"ok": True}
+
+@api.post("/bookings/{booking_id}/sos")
+async def sos(booking_id: str, user=Depends(get_current_user)):
+    rec = {"id": new_id(), "booking_id": booking_id, "user_id": user["id"], "created_at": now_iso(), "resolved": False}
+    await db.sos_alerts.insert_one(rec)
+    return {"ok": True, "message": "Emergency services notified"}
+
+# ============================================================
+# DRIVER
+# ============================================================
+@api.post("/driver/online")
+async def driver_online(req: OnlineToggle, user=Depends(require_role(["driver"]))):
+    update = {"online": req.online}
+    if req.lat is not None and req.lng is not None:
+        update["current_lat"] = req.lat
+        update["current_lng"] = req.lng
+    await db.users.update_one({"id": user["id"]}, {"$set": update})
+    return {"online": req.online}
+
+@api.get("/driver/requests")
+async def driver_requests(user=Depends(require_role(["driver"]))):
+    # Return open booking requests matching driver vehicle type
+    veh_type = (user.get("vehicle") or {}).get("type")
+    q = {"status": "requested", "driver_id": None}
+    if veh_type:
+        q["service_type"] = {"$in": [veh_type, "car"] if veh_type == "car" else [veh_type]}
+    docs = await db.bookings.find(q, {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
+    return docs
+
+@api.get("/driver/earnings")
+async def driver_earnings(user=Depends(require_role(["driver"]))):
+    completed = await db.bookings.find({"driver_id": user["id"], "status": "completed"}, {"_id": 0}).to_list(1000)
+    today = datetime.now(timezone.utc).date().isoformat()
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    today_total = sum(b["fare"]["total"] * 0.8 for b in completed if b.get("updated_at", "").startswith(today))
+    week_total = sum(b["fare"]["total"] * 0.8 for b in completed if b.get("updated_at", "") >= week_ago)
+    return {
+        "today": round(today_total, 2),
+        "week": round(week_total, 2),
+        "total": round(sum(b["fare"]["total"] * 0.8 for b in completed), 2),
+        "trips_today": sum(1 for b in completed if b.get("updated_at", "").startswith(today)),
+        "trips_week": sum(1 for b in completed if b.get("updated_at", "") >= week_ago),
+        "trips_total": len(completed),
+        "wallet": user.get("wallet_balance", 0),
+    }
+
+@api.post("/driver/kyc")
+async def driver_kyc(req: KYCUpdate, user=Depends(require_role(["driver"]))):
+    kyc = {k: v for k, v in req.dict().items() if v is not None}
+    vehicle = {}
+    for k in ("vehicle_make", "vehicle_model", "vehicle_number", "vehicle_type"):
+        if kyc.get(k):
+            vehicle[k.replace("vehicle_", "")] = kyc.pop(k)
+    update = {"kyc": kyc, "kyc_status": "submitted"}
+    if vehicle:
+        update["vehicle"] = vehicle
+    await db.users.update_one({"id": user["id"]}, {"$set": update})
+    return {"ok": True, "kyc_status": "submitted"}
+
+# ============================================================
+# WALLET
+# ============================================================
+@api.get("/wallet")
+async def get_wallet(user=Depends(get_current_user)):
+    txns = await db.transactions.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
+    return {"balance": user.get("wallet_balance", 0), "transactions": txns}
+
+@api.post("/wallet/topup")
+async def wallet_topup(req: WalletTopup, user=Depends(get_current_user)):
+    if req.amount <= 0:
+        raise HTTPException(400, "Invalid amount")
+    await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": req.amount}})
+    await db.transactions.insert_one({
+        "id": new_id(), "user_id": user["id"], "amount": req.amount,
+        "type": "topup", "status": "success", "created_at": now_iso(),
+    })
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return {"balance": u.get("wallet_balance", 0)}
+
+# ============================================================
+# AI
+# ============================================================
+@api.post("/ai/chat")
+async def ai_chat(req: ChatMessageReq, user=Depends(get_current_user)):
+    session_id = req.session_id or new_id()
+    if not EMERGENT_LLM_KEY:
+        return {"session_id": session_id, "reply": "AI is currently unavailable. Please configure EMERGENT_LLM_KEY."}
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        system_msg = (
+            "You are RK POOJA AI Assistant — a polite, concise mobility & travel assistant for an Indian ride-hailing super app. "
+            "Help users with: booking rides (car, auto, bike, tempo, bus), parcel delivery (porter, goods), "
+            "fare estimates, trip planning, language translation (Hindi/Marathi/Tamil/Telugu/etc), and support. "
+            "Always reply in 2-4 short sentences. If user asks to book, suggest the right service category."
+        )
+        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=system_msg).with_model("openai", "gpt-5.4")
+        # Persist message context (last 6)
+        prior = await db.chat_messages.find({"session_id": session_id}, {"_id": 0}).sort("created_at", -1).limit(6).to_list(6)
+        prior.reverse()
+        context = "\n".join(f"{m['role']}: {m['content']}" for m in prior)
+        prompt = f"Previous conversation:\n{context}\n\nUser now: {req.message}" if prior else req.message
+        reply = await chat.send_message(UserMessage(text=prompt))
+        # Persist
+        await db.chat_messages.insert_many([
+            {"id": new_id(), "session_id": session_id, "user_id": user["id"], "role": "user", "content": req.message, "created_at": now_iso()},
+            {"id": new_id(), "session_id": session_id, "user_id": user["id"], "role": "assistant", "content": reply, "created_at": now_iso()},
+        ])
+        return {"session_id": session_id, "reply": reply}
+    except Exception as e:
+        logging.exception("AI chat failed")
+        return {"session_id": session_id, "reply": f"Sorry, I had trouble responding. Try again.", "error": str(e)}
+
+@api.post("/ai/parse-booking")
+async def ai_parse_booking(req: VoiceBookingParse, user=Depends(get_current_user)):
+    """Parse a natural-language booking request into structured form fields."""
+    if not EMERGENT_LLM_KEY:
+        return {"service_type": "car", "vehicle_category": "sedan", "notes": req.transcript}
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        system_msg = (
+            "Extract booking intent from user's natural-language request. "
+            "Reply ONLY with a single JSON object with keys: "
+            "service_type (one of car|auto|bike|tempo|bus|porter|goods|airport|outstation), "
+            "vehicle_category (mini|sedan|suv|premium|luxury|ev|auto|bike|9s|12s|17s|20s|26s|mini|ac|sleeper|volvo|tata_ace|mini_truck|pickup|truck|container|heavy), "
+            "pickup_text (string), drop_text (string), passengers (integer), notes (string). "
+            "If unclear, use sensible defaults. No prose, no markdown."
+        )
+        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=new_id(), system_message=system_msg).with_model("openai", "gpt-5.4")
+        reply = await chat.send_message(UserMessage(text=req.transcript))
+        import json, re
+        m = re.search(r'\{.*\}', reply, re.DOTALL)
+        if m:
+            return json.loads(m.group(0))
+        return {"service_type": "car", "vehicle_category": "sedan", "notes": req.transcript}
+    except Exception as e:
+        logging.exception("AI parse failed")
+        return {"service_type": "car", "vehicle_category": "sedan", "notes": req.transcript, "error": str(e)}
+
+# ============================================================
+# ADMIN
+# ============================================================
+@api.get("/admin/stats")
+async def admin_stats(user=Depends(require_role(["admin"]))):
+    total_users = await db.users.count_documents({"role": "customer"})
+    total_drivers = await db.users.count_documents({"role": "driver"})
+    online_drivers = await db.users.count_documents({"role": "driver", "online": True})
+    total_bookings = await db.bookings.count_documents({})
+    active = await db.bookings.count_documents({"status": {"$in": ["requested", "accepted", "arrived", "started"]}})
+    completed = await db.bookings.count_documents({"status": "completed"})
+    # Revenue
+    txns = await db.transactions.find({"type": "trip"}, {"_id": 0}).to_list(10000)
+    revenue = sum(t.get("commission", 0) for t in txns)
+    gross = sum(t.get("amount", 0) for t in txns)
+    # last 7 day buckets
+    buckets = {}
+    for t in txns:
+        d = (t.get("created_at") or "")[:10]
+        buckets[d] = buckets.get(d, 0) + t.get("amount", 0)
+    series = [{"date": k, "gross": round(v, 2)} for k, v in sorted(buckets.items())[-7:]]
+    return {
+        "total_users": total_users,
+        "total_drivers": total_drivers,
+        "online_drivers": online_drivers,
+        "total_bookings": total_bookings,
+        "active_bookings": active,
+        "completed_bookings": completed,
+        "gross_revenue": round(gross, 2),
+        "platform_revenue": round(revenue, 2),
+        "series": series,
+    }
+
+@api.get("/admin/users")
+async def admin_users(role: Optional[str] = None, user=Depends(require_role(["admin"]))):
+    q = {}
+    if role:
+        q["role"] = role
+    docs = await db.users.find(q, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
+    return docs
+
+@api.get("/admin/bookings")
+async def admin_bookings(status: Optional[str] = None, user=Depends(require_role(["admin"]))):
+    q = {}
+    if status:
+        q["status"] = status
+    docs = await db.bookings.find(q, {"_id": 0}).sort("created_at", -1).limit(200).to_list(200)
+    return docs
+
+@api.post("/admin/promo")
+async def admin_create_promo(req: PromoCreate, user=Depends(require_role(["admin"]))):
+    rec = {"id": new_id(), **req.dict(), "created_at": now_iso()}
+    await db.promos.insert_one({**rec})
+    rec.pop("_id", None)
+    return rec
+
+@api.get("/admin/promos")
+async def admin_list_promos(user=Depends(require_role(["admin"]))):
+    return await db.promos.find({}, {"_id": 0}).to_list(200)
+
+@api.patch("/admin/users/{user_id}/verify")
+async def admin_verify(user_id: str, body: Dict[str, Any], user=Depends(require_role(["admin"]))):
+    status = body.get("status", "verified")
+    await db.users.update_one({"id": user_id}, {"$set": {"kyc_status": status}})
+    return {"ok": True}
+
+# ============================================================
+# FLEET OWNER
+# ============================================================
+@api.get("/fleet/stats")
+async def fleet_stats(user=Depends(require_role(["fleet"]))):
+    vehicles = await db.vehicles.find({"fleet_id": user["id"]}, {"_id": 0}).to_list(200)
+    driver_ids = [v.get("driver_id") for v in vehicles if v.get("driver_id")]
+    bookings = await db.bookings.find({"driver_id": {"$in": driver_ids}, "status": "completed"}, {"_id": 0}).to_list(1000)
+    revenue = sum(b["fare"]["total"] * 0.8 for b in bookings)
+    return {
+        "vehicles": len(vehicles),
+        "drivers": len(set(driver_ids)),
+        "trips": len(bookings),
+        "revenue": round(revenue, 2),
+        "vehicles_list": vehicles,
+    }
+
+@api.post("/fleet/vehicles")
+async def fleet_add_vehicle(req: VehicleCreate, user=Depends(require_role(["fleet"]))):
+    driver_id = None
+    if req.driver_email:
+        drv = await db.users.find_one({"email": req.driver_email, "role": "driver"})
+        if drv:
+            driver_id = drv["id"]
+    veh = {
+        "id": new_id(),
+        "fleet_id": user["id"],
+        "make": req.make, "model": req.model, "number": req.number,
+        "type": req.type, "capacity": req.capacity,
+        "driver_id": driver_id, "driver_email": req.driver_email,
+        "created_at": now_iso(),
+    }
+    await db.vehicles.insert_one({**veh})
+    veh.pop("_id", None)
+    return veh
+
+@api.get("/fleet/vehicles")
+async def fleet_vehicles(user=Depends(require_role(["fleet"]))):
+    return await db.vehicles.find({"fleet_id": user["id"]}, {"_id": 0}).to_list(200)
+
+# ============================================================
+# DEMO SEED
+# ============================================================
+@api.post("/seed/demo")
+async def seed_demo():
+    """Idempotently create demo users for quick testing."""
+    demos = [
+        {"email": "customer@rkpooja.test", "role": "customer", "name": "Aarav Sharma", "phone": "+919999911111"},
+        {"email": "driver@rkpooja.test",   "role": "driver",   "name": "Rajesh Kumar", "phone": "+919999922222",
+         "online": True, "current_lat": 25.6093, "current_lng": 85.1235, "rating": 4.8,
+         "vehicle": {"make": "Maruti", "model": "Swift Dzire", "number": "BR01AB1234", "type": "car"},
+         "kyc_status": "verified"},
+        {"email": "admin@rkpooja.test",    "role": "admin",    "name": "Admin User", "phone": "+919999933333"},
+        {"email": "fleet@rkpooja.test",    "role": "fleet",    "name": "Pooja Fleet", "phone": "+919999944444"},
+    ]
+    created = []
+    for d in demos:
+        existing = await db.users.find_one({"email": d["email"]})
+        if existing:
+            continue
+        user = {
+            "id": new_id(),
+            "email": d["email"], "name": d["name"], "phone": d["phone"], "role": d["role"],
+            "wallet_balance": 1000.0, "rating": d.get("rating", 5.0), "trips": 0,
+            "online": d.get("online", False),
+            "current_lat": d.get("current_lat"), "current_lng": d.get("current_lng"),
+            "kyc_status": d.get("kyc_status", "pending"), "kyc": {},
+            "vehicle": d.get("vehicle", {}), "preferred_language": "en",
+            "created_at": now_iso(),
+        }
+        await db.users.insert_one({**user})
+        created.append(d["email"])
+    return {"created": created, "demo_otp": "123456", "demo_emails": [d["email"] for d in demos]}
+
+@api.get("/health")
+async def health():
+    return {"status": "ok", "time": now_iso()}
+
+# Register
+app.include_router(api)
 
 app.add_middleware(
     CORSMiddleware,
@@ -77,12 +737,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
