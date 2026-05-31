@@ -34,7 +34,7 @@ export const AdminDashboard = () => {
 
       <div className="mt-6 border border-border rounded-2xl p-5 bg-card">
         <div className="label-eyebrow">Revenue · last 7 days</div>
-        <div className="h-72 mt-3">
+        <div className="h-72 mt-3 min-h-[260px]">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={stats.series.length ? stats.series : [{date:"",gross:0}]}>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))"/>
