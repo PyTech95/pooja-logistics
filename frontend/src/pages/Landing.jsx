@@ -40,7 +40,8 @@ export const Landing = () => {
       <section className="relative overflow-hidden">
         <div className="max-w-7xl mx-auto px-6 pt-16 pb-24 grid lg:grid-cols-12 gap-10 items-center">
           <div className="lg:col-span-7 animate-slide-up">
-            <div className="label-eyebrow mb-5" data-testid="hero-eyebrow">India's Mobility Super App</div>
+            <Logo variant="full" size="sm" />
+            <div className="label-eyebrow mt-6 mb-3" data-testid="hero-eyebrow">India's Mobility Super App</div>
             <h1 className="font-display font-black text-5xl sm:text-6xl lg:text-7xl tracking-[-0.04em] leading-[0.95]">
               ONE APP.<br/>
               <span className="text-flame">ALL RIDES.</span>

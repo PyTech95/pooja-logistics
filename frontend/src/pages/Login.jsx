@@ -75,9 +75,12 @@ export const Login = () => {
       {/* Left brand panel */}
       <div className="hidden lg:flex relative overflow-hidden bg-brand text-white flex-col justify-between p-12">
         <Logo size="lg" inverted />
-        <div>
-          <div className="label-eyebrow text-white/60">India's mobility super app</div>
-          <h2 className="font-display font-black text-5xl xl:text-6xl mt-4 leading-[1] tracking-[-0.03em]">
+        <div className="relative z-10">
+          <div className="bg-white rounded-3xl p-6 inline-block shadow-2xl">
+            <Logo variant="full" size="md" />
+          </div>
+          <div className="label-eyebrow text-white/60 mt-8">India's mobility super app</div>
+          <h2 className="font-display font-black text-5xl xl:text-6xl mt-3 leading-[1] tracking-[-0.03em]">
             ONE APP.<br/><span className="text-flame">ALL RIDES.</span>
           </h2>
           <p className="text-white/70 mt-6 max-w-md">Car · Auto · Bike · Tempo · Bus · Porter · Goods · Outstation · Airport. All in one tap.</p>
