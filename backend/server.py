@@ -556,7 +556,7 @@ async def ai_chat(req: ChatMessageReq, user=Depends(get_current_user)):
             "fare estimates, trip planning, language translation (Hindi/Marathi/Tamil/Telugu/etc), and support. "
             "Always reply in 2-4 short sentences. If user asks to book, suggest the right service category."
         )
-        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=system_msg).with_model("openai", "gpt-5.4")
+        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=system_msg).with_model("openai", "gpt-5")
         # Persist message context (last 6)
         prior = await db.chat_messages.find({"session_id": session_id}, {"_id": 0}).sort("created_at", -1).limit(6).to_list(6)
         prior.reverse()
@@ -588,7 +588,7 @@ async def ai_parse_booking(req: VoiceBookingParse, user=Depends(get_current_user
             "pickup_text (string), drop_text (string), passengers (integer), notes (string). "
             "If unclear, use sensible defaults. No prose, no markdown."
         )
-        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=new_id(), system_message=system_msg).with_model("openai", "gpt-5.4")
+        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=new_id(), system_message=system_msg).with_model("openai", "gpt-5")
         reply = await chat.send_message(UserMessage(text=req.transcript))
         import json, re
         m = re.search(r'\{.*\}', reply, re.DOTALL)

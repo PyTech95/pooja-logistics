@@ -9,35 +9,39 @@ Build a complete production-grade Mobility, Travel, Logistics and Transportation
 ## Architecture
 - **Backend** — `/app/backend/server.py` · FastAPI + Motor (MongoDB) · JWT auth · all routes under `/api`
 - **Frontend** — React 19 + react-router-dom v7 + Tailwind + shadcn/ui · path alias `@/...` · fonts: Cabinet Grotesk + Satoshi via Fontshare
-- **AI** — `emergentintegrations` with `gpt-5.4` (chat + voice booking parser)
+- **AI** — `emergentintegrations` with `gpt-5` (chat + voice booking parser)
 - **Map** — stylised `<canvas>` (`MapCanvas.jsx`) — pins, route, driver marker, light/dark aware
 
 ## What's been implemented (Feb 2026)
-**Backend (25/25 tests passing)**
-- Auth: email OTP request/verify, JWT, /auth/me, profile update
-- Roles & RBAC (customer / driver / admin / fleet)
-- Services catalog (9 services, multiple categories), fare estimator with surge
-- Bookings: create, list, status flow (requested → accepted → arrived → started → completed/cancelled), live location update, rate, SOS
-- Driver: online/offline, nearby requests, earnings, KYC submit
-- Wallet: balance, transactions, topup
-- AI: chat (`/ai/chat` with session persistence), voice-booking parser (`/ai/parse-booking`)
-- Admin: stats, users, bookings, promos, KYC verify
-- Fleet: vehicles CRUD, stats
-- Idempotent demo seed `/seed/demo`
 
-**Frontend**
-- Landing page with hero, services strip, features, CTA panel
-- Login page with role tabs + OTP flow + 4 quick-demo tiles
-- Customer portal (`/app/*`) — Home with 9 service tiles + AI voice input, BookRide (location → vehicle → confirm), TrackBooking with live driver card + PIN + SOS + rate, Trips history, Wallet topup, AI chat, Profile w/ 12 languages
-- Driver portal (`/driver/*`) — Online toggle, dashboard with stats + active trip card + nearby requests, Earnings with 7-day chart, KYC form, Trips table
-- Admin portal (`/admin/*`) — Mission Control stats + 7-day chart, Users (tabs by role + KYC verify), Bookings (status filter), Promo create + list
-- Fleet portal (`/fleet/*`) — Stats + add vehicle + vehicle list
+### Iteration 1 (foundation)
+- Auth: OTP request/verify, JWT, /auth/me, profile update — 4 roles (customer/driver/admin/fleet)
+- Services catalog (9), fare estimator with surge pricing
+- Bookings full lifecycle (requested → completed) + live tracking + rating + SOS
+- Driver online/offline, requests, earnings, KYC, vehicle assignment
+- Wallet + topup + transactions
+- AI chat + voice-booking parser
+- Admin stats + users + bookings + promos + KYC verify
+- Fleet vehicles + stats
+- All 4 portal UIs
+
+### Iteration 2 (Feb 2026)
+- **Landing page redesigned** — sticky header w/ section nav, phone mockup hero with floating chips, stats strip, services grid, how-it-works (3 steps), why-section + sign-up bonus card, testimonials, driver-partner showcase, demo CTA, full footer
+- **Login redesigned** — splash with tilted logo card + animated floating service icons + 3-stat grid; OTP step uses 6-slot InputOTP with auto-verify
+- **Bus seat-selection + QR e-ticket** — 5 routes, A-D seat layout with booked/selected states, passenger details, e-ticket with QR scan code
+- **Referral program** — code, copy/WhatsApp/share, redeem to credit ₹100 to both invitee & referrer, history
+- **Notifications inbox** — auto-pushed on booking lifecycle + referral, unread badge in header, mark-all-read
+- **Share-trip link** — share button on TrackBooking; public-safe `/api/share/booking/:id`
+- **PWA manifest** + theme-color + favicon from official logo
+- **Brand mark** in headers (CSS) + full uploaded logo on hero/splash
+- **AI model fixed** to `gpt-5` (was invalid `gpt-5.4`)
+- **41/42 backend tests passing**
 
 ## Personas
-- **Customer (Aarav)** — books rides/parcels, manages wallet, chats with AI
-- **Driver (Rajesh)** — toggles online, accepts trips, KYC, earnings
-- **Admin** — monitors GMV, drivers, bookings, promos
-- **Fleet owner** — onboards vehicles + assigns drivers + tracks earnings
+- **Customer (Aarav)** — books rides/parcels/buses, manages wallet, refers friends, chats AI
+- **Driver (Rajesh)** — toggles online, accepts trips, KYC, earnings dashboard
+- **Admin** — monitors GMV, drivers, bookings, promos, verifies KYC
+- **Fleet owner** — onboards vehicles + drivers + tracks earnings
 
 ## P0 backlog (next)
 - Google/OSM real map integration with live geolocation
@@ -46,17 +50,16 @@ Build a complete production-grade Mobility, Travel, Logistics and Transportation
 - WebSocket-based live tracking (currently 4s polling)
 
 ## P1 backlog
-- Bus seat-selection UI + digital QR ticket
 - Driver vehicle/RC document upload (object storage)
-- Multi-language UI strings via i18n (currently labels only)
+- Multi-language UI strings via i18n (labels in place)
 - Push notifications (FCM) + WhatsApp transactional
-- Referral program rewards distribution
+- Driver background check workflow
 
 ## P2 backlog
-- Surge heatmap on admin map
-- Driver background check workflow
+- Surge heatmap on admin live map
 - Corporate billing portal
 - AI surge-pricing model from historical data
+- Loyalty tiers (silver/gold/platinum) tied to trip count
 
 ## Demo credentials
 See `/app/memory/test_credentials.md`. All accounts use OTP `123456`.
