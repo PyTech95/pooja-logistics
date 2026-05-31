@@ -1,0 +1,162 @@
+{
+  "theme_and_archetype": {
+    "domain": "Mobility, Logistics, and Travel Super App",
+    "theme": "Light & Dark Mode (Mobile-First PWA + Dashboards)",
+    "archetype": "Archetype 4 (Swiss & High-Contrast) blended with Archetype 5 (Luxury)",
+    "reasoning": "Mobility apps require extreme clarity, high contrast for outdoor legibility, and a dense hierarchy for data (Swiss). The premium, Apple-level vibe requested demands deep tones, crisp typography, and sophisticated glassmorphism (Luxury)."
+  },
+  "brand_identity": {
+    "name": "RK POOJA",
+    "tagline": "ONE APP. ALL RIDES.",
+    "vibe": "Uber-Level Quality, Ola-Level Simplicity, Apple-Level Design",
+    "emotional_tone": "Reliable, Premium, Fast, Secure"
+  },
+  "colors": {
+    "primary": {
+      "DEFAULT": "#0A2E6D",
+      "light": "#1E4A96",
+      "dark": "#051A42",
+      "foreground": "#FFFFFF"
+    },
+    "accent": {
+      "DEFAULT": "#FF7A00",
+      "light": "#FF9933",
+      "dark": "#CC6200",
+      "foreground": "#FFFFFF"
+    },
+    "success": {
+      "DEFAULT": "#16A34A",
+      "foreground": "#FFFFFF"
+    },
+    "background": {
+      "light": "#F8FAFC",
+      "dark": "#0A0A0A"
+    },
+    "surface": {
+      "light": "#FFFFFF",
+      "dark": "#121212"
+    },
+    "border": {
+      "light": "#E2E8F0",
+      "dark": "#27272A"
+    },
+    "text": {
+      "light": {
+        "primary": "#0F172A",
+        "secondary": "#64748B"
+      },
+      "dark": {
+        "primary": "#F8FAFC",
+        "secondary": "#94A3B8"
+      }
+    },
+    "map_accents": {
+      "route_line": "#FF7A00",
+      "user_location": "#0A2E6D",
+      "driver_location": "#16A34A"
+    },
+    "forbidden_colors": [
+      "#9D4CDD",
+      "#1B93A4",
+      "#7351B7",
+      "Generic Purple/Violet gradients"
+    ]
+  },
+  "typography": {
+    "strategy": "Swiss Brutalist meets Premium Tech",
+    "font_families": {
+      "headings": "'Cabinet Grotesk', sans-serif",
+      "body": "'Satoshi', sans-serif",
+      "mono": "'JetBrains Mono', monospace (for codes, OTPs, license plates)"
+    },
+    "scales": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tighter font-black",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight font-bold",
+      "h3": "text-xl sm:text-2xl tracking-tight font-semibold",
+      "body": "text-base leading-relaxed font-medium",
+      "label": "text-xs tracking-[0.2em] uppercase font-bold"
+    },
+    "forbidden_fonts": [
+      "Inter",
+      "Roboto",
+      "Open Sans",
+      "Lato",
+      "Space Grotesk"
+    ]
+  },
+  "layout_and_spacing": {
+    "strategy": "High Density for Dashboards, Bottom-Heavy & Reachable for Mobile Apps",
+    "mobile_app": {
+      "grid": "Bento Grid Protocol (Control Room) - Tight (gap-4) for service selector grid.",
+      "bottom_sheet": "Primary interaction pattern for maps. Use framer-motion for smooth dragging.",
+      "safe_areas": "Generous padding at bottom (pb-24) to avoid OS home bars."
+    },
+    "dashboards": {
+      "grid": "Strict 12-column grid. Dense metrics. Cardless UI with 1px solid borders.",
+      "sidebar": "Collapsible, pure geometric icons."
+    },
+    "spacing_scale": "p-1, p-2, p-4, p-6, p-8, p-12. Containers with borders must have internal padding (p-6).",
+    "radius": "Subtle roundness. Dashboards (max 8px). Mobile App Bottom Sheets (rounded-t-3xl)."
+  },
+  "components": {
+    "buttons": {
+      "primary": "Solid #0A2E6D (Light Mode) or #FFFFFF (Dark Mode). Hover state: lighter hue, text-white. Full width on mobile.",
+      "accent": "Solid #FF7A00 for primary action like 'Confirm Ride'. Pulse animation for live matching.",
+      "micro_interaction": "Scale down on press (active:scale-95 transition-transform)."
+    },
+    "cards_and_surfaces": {
+      "mobile_map_overlay": "Glassmorphism (The 'Crystal' Variant). backdrop-blur-xl bg-white/70 (light) or bg-black/60 (dark). 1px delicate inner stroke.",
+      "dashboard_widgets": "Neumorphism/Tactile variants avoided. Use Flat Solid with 1px border-border and no shadow.",
+      "service_tiles": "Flat background, 1px subtle border, sharp or slightly rounded (8px). On hover/tap: border-accent and slight lift."
+    },
+    "inputs": {
+      "style": "Large touch targets (h-14 on mobile). Solid fill background (bg-muted/50), no border until focused (focus:ring-2 focus:ring-accent)."
+    },
+    "icons": {
+      "library": "lucide-react",
+      "style": "Stroke width 2.0. Clean, recognizable. Used extensively in service grids."
+    },
+    "forbidden_patterns": [
+      "Centered card grids",
+      "Floating labels that lack contrast",
+      "AI slop graphics"
+    ]
+  },
+  "motion_and_interactions": {
+    "principles": "Frictionless, familiar, brand-distinct. Micro-interactions for feedback.",
+    "page_transitions": "Slide up for new sheets, fade for tab changes.",
+    "live_tracking": "Smooth interpolation for vehicle movement on map. Pulsing ring around user location.",
+    "loading": "Skeleton loaders matching the shape of content. No generic spinners for main content."
+  },
+  "testing": {
+    "requirements": "All interactive and key informational elements MUST include `data-testid` attribute (e.g., `data-testid=\"confirm-booking-button\"`)."
+  },
+  "media_and_assets": {
+    "guidelines": "Use high-quality assets. Avoid generic placeholders.",
+    "image_urls": {
+      "vehicle_3d_assets": {
+        "url": "https://static.prod-images.emergentagent.com/jobs/777562a4-1042-4355-bdae-5f82cef9964a/images/eaedf881f3dfade8443de30ec9f13a6ee4ab54d21fd108fcceff213dc9186e49.png",
+        "description": "Premium 3D isometric illustration of a sleek modern electric sedan car and an auto rickshaw. Use for service selector tiles or hero marketing.",
+        "category": "vehicles"
+      },
+      "map_ui_dark": {
+        "url": "https://static.prod-images.emergentagent.com/jobs/777562a4-1042-4355-bdae-5f82cef9964a/images/0241aeb76524d82334cb0b50aecc97a8c345afa3a61a7813fe2f8738df6e8293.png",
+        "description": "Minimalist, dark mode mobile app map interface. Use as map background reference or placeholder in dashboard live tracking views.",
+        "category": "map_background"
+      },
+      "map_ui_light": {
+        "url": "https://static.prod-images.emergentagent.com/jobs/777562a4-1042-4355-bdae-5f82cef9964a/images/28d1e7436833cf1d6bbc5df087346cc48573ff70d939bf589b646f4887e15721.png",
+        "description": "Minimalist, light mode mobile app map interface. Use as map background reference.",
+        "category": "map_background"
+      }
+    }
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the color palette, using Primary Blue (#0A2E6D) for structure/brand and Accent Orange (#FF7A00) for primary actions (Booking/Surge).",
+    "Implement Cabinet Grotesk for headings and Satoshi for body text.",
+    "For the Customer App, the Map should take up the background (h-screen), with UI layered as a bottom sheet (Glassmorphism).",
+    "The Service Selector grid should use tight spacing (gap-3 or gap-4) with clear Lucide icons and small labels. Do NOT use generic centered cards.",
+    "Admin/Fleet Dashboards must follow Archetype 4 (Swiss/High-Contrast): dense grids, 1px solid borders, no shadows, maximum data visibility.",
+    "Ensure all interactive elements have kebab-case data-testid attributes for testing."
+  ]
+}
